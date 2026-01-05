@@ -1,0 +1,1258 @@
+---
+title: "filtering"
+author: "Robin Pranter"
+date: "2025-03-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+rm(list= ls()); gc()
+start_time <- Sys.time()
+
+path <- paste0("C:/Users/robin/OneDrive - Lund University/", 
+               "PhD_RobinPranter/01_Projects/01_NCCAtlas/02_Drylab/")
+
+# Load libraries
+library(Seurat)
+library(tidyverse)
+library(patchwork)
+library(viridis)
+library(glmGamPoi)
+
+
+#library(future) #apparently already loaded with library(Seurat)
+#plan("multisession", workers = 14) # My machine has 14 cores and 20 threads. 
+#plan()                             # However, looking at the task manager while 
+                                   # running SCTransform, it does not appear to 
+                                   # efficiently use 19 workers.
+
+# OBS Seurat V5 no longer support parallel computing through future 
+# https://github.com/satijalab/seurat/issues/9780#issuecomment-2762207913
+
+options(future.globals.maxSize = 28000*(1024^2)) # 32000*1024^2 is my machines total
+getOption("future.globals.maxSize")              # by leaving 4GB of margin for 
+                                                 # unexpected memory peaks I avoid 
+                                                 # crashing the computer
+```
+
+# Read data
+Read in the RDS-object that has all the data and metadata calculated and compiled by 
+01_CompileDara.Rmd. It is important to read an updated RDS file.
+```{r}
+filename <- list.files(paste0(path, "03_AnalysisAllData/"), 
+           pattern = "01_CompileData_output")
+if (length(filename) == 1) {
+  all.SO <- readRDS(file = paste0(path, "03_AnalysisAllData/", filename))
+  } else {
+    print("Choose file to read")
+    print(filename)
+    }
+rm(filename)
+```
+
+## Basic stats for methods paper
+```{r}
+all.SO@meta.data %>% 
+  subset(SomSt == "28ss") %>%
+  summarize(n = n(),
+            av_count = mean(nCount_RNA) %>% round(),
+            sd_count = sd(nCount_RNA) %>% round(),
+            av_genes = mean(nFeature_RNA) %>% round(),
+            sd_genes = sd(nFeature_RNA) %>% round()) %>%
+  t()
+```
+
+
+# Plot QC meta data (no filter)
+## Violins
+### By plate and sample
+```{r}
+# Choose features to plot
+feats <- c("nCount_RNA", "nFeature_RNA", "nCount_ERCC", "nFeature_ERCC",
+           "total_reads", "mapped_perc", "exonic_perc", "intron_perc",
+           "intgen_perc", "percent.mt", "percent.rb") #, "total_reads")
+# Create a VlnPlot for each feature
+P01 <- lapply(seq_along(feats), function(i) {
+  p <- VlnPlot(all.SO, features = feats[i], 
+               group.by = "plateID", 
+               split.by = "sampleID", 
+               pt.size = .1, 
+               cols = viridis(length(unique(all.SO$sampleID)), 
+                              alpha = 0.7, option = "D"),
+               assay = "RNA", layer = "counts") +
+    theme(text = element_text(size = 6),
+          axis.title.x = element_blank(),
+          axis.title.y = element_text(size = 6),
+          axis.text = element_text(size = 6),
+          legend.text = element_text(size = 6),
+          legend.title = element_text(size = 6),
+          legend.key.size = unit(3, "mm"))
+  })
+# Combine all plots into a single plot
+P01 <- wrap_plots(P01, ncol = 6) + plot_layout(guides = "collect")
+# Display the combined plot
+P01
+# Save the combined plot
+#ggsave(plot = P01, 
+#       filename = paste0(outputfolder, "03_Results/P01_QC_unfilt.png"),
+#       width = 180, height = 180, units = "mm")
+```
+
+### By somite stage and phenotype
+```{r}
+# Create a VlnPlot for each feature
+P01b <- lapply(seq_along(feats), function(i) {
+  p <- VlnPlot(all.SO, features = feats[i], 
+               group.by = "SomSt_Simp", 
+               split.by = "Pheno",
+               pt.size = .1,
+               cols = viridis(length(unique(all.SO$Pheno)), 
+                              alpha = 0.7, option = "D"),
+               assay = "RNA", layer = "counts") +
+    theme(text = element_text(size = 6),
+          axis.title.x = element_blank(),
+          axis.title.y = element_text(size = 6),
+          axis.text = element_text(size = 6),
+          legend.text = element_text(size = 6),
+          legend.title = element_text(size = 6),
+          legend.key.size = unit(3, "mm"))
+  })
+# Combine all plots into a single plot
+P01b <- wrap_plots(P01b, ncol = 6) + plot_layout(guides = "collect")
+# Display the combined plot
+P01b
+```
+
+## Scatter
+### Features and counts
+#### By Plate and sample
+```{r}
+# Define QCs
+QCs <- list(c("nCount_RNA", "nFeature_RNA"),
+            c("nCount_ERCC", "nFeature_ERCC"),
+            c("nCount_ERCC", "nCount_RNA"),
+            c("nFeature_ERCC", "nFeature_RNA"))
+# Define categores for colouring
+categories <- c("plateID", "sampleID")
+
+# Generate plots using lapply()
+P02 <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(all.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P02 <- wrap_plots(P02, ncol = 4) + plot_layout(guides = "collect")
+P02
+```
+
+#### By somite stage and phenotype
+```{r}
+# Define QC pairs to plot
+QCs <- list(c("nCount_RNA", "nFeature_RNA"),
+                     c("nCount_ERCC", "nFeature_ERCC"),
+                     c("nCount_ERCC", "nCount_RNA"),
+                     c("nFeature_ERCC", "nFeature_RNA"))
+# define categories for coloring
+categories <- c("Pheno", "SomSt_Simp")
+
+# Generate plots using lapply()
+P02b <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(all.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P02b <- wrap_plots(P02b, ncol = 4) + plot_layout(guides = "collect")
+P02b
+```
+
+### Mapping percentages
+#### By plate and sample
+```{r}
+# Define QC pairs to plot
+QCs <- list(c("total_reads", "mapped_perc"),
+            c("mapped_perc", "nCount_RNA"),
+            c("mapped_perc", "exonic_perc"),
+            c("mapped_perc", "intron_perc"),
+            c("mapped_perc", "intgen_perc"))
+# Define categories for coloring
+categories <- c("plateID", "sampleID")
+
+# Generate plots using lapply()
+P02c <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(all.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+
+# Arrange the plots
+P02c <- wrap_plots(P02c, ncol = 5) + plot_layout(guides = "collect")
+P02c
+```
+
+```{r}
+P02d <- list(VlnPlot(all.SO, "total_reads", group.by = "plateID", 
+                     split.by = "sampleID") + 
+               labs(title = "All cells",
+                    y = "total_reads"),
+             
+             VlnPlot(all.SO, "total_reads", group.by = "plateID", 
+                     split.by = "FACS_d") + 
+               labs(title = "All cells",
+                    y = "total_reads"),
+             
+             VlnPlot(all.SO, "mapped_perc", group.by = "plateID", 
+                     split.by = "sampleID") + 
+               labs(title = "All cells",
+                    y = "mapped_perc"),
+             
+             VlnPlot(subset(all.SO, subset = mapped_perc > 50), 
+                    "mapped_perc", group.by = "plateID", 
+                     split.by = "sampleID") + 
+               labs(title = "mapped_perc < 50",
+                    y = "mapped_perc"),
+             
+             FeatureScatter(all.SO, 
+                            "total_reads", "mapped_perc", shuffle = TRUE,
+                            group.by = "plateID") + 
+               labs(title = "All cells"),
+             
+             FeatureScatter(subset(all.SO, subset = total_reads < 1.5e06 &
+                                                    mapped_perc > 50), 
+                            "total_reads", "mapped_perc", shuffle = TRUE,
+                            group.by = "plateID") + 
+               labs(title = "total_reads < 1.5e06 & mapped_perc > 50"),
+             
+             FeatureScatter(subset(all.SO, subset = plateID == "P32812_103" |
+                                                    plateID == "P32812_107" |
+                                                    plateID == "P32812_113" |
+                                                    plateID == "P32812_119" |
+                                                    plateID == "P32812_125"), 
+                            "total_reads", "mapped_perc", shuffle = TRUE,
+                            group.by = "plateID") + 
+               labs(title = "Plates with high total_reads"),
+             
+             FeatureScatter(subset(all.SO, subset = !(plateID == "P32812_103" |
+                                                    plateID == "P32812_107" |
+                                                    plateID == "P32812_113" |
+                                                    plateID == "P32812_119" |
+                                                    plateID == "P32812_125")), 
+                            "total_reads", "mapped_perc", shuffle = TRUE,
+                            group.by = "plateID") + 
+               labs(title = "Plates with low/normal total reads")
+             )
+P02d <- wrap_plots(P02d, ncol=4) + plot_layout(guides = "collect") &
+  theme(text = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.key.size = unit(3, "mm"),
+        legend.text = element_text(size = 6))
+P02d
+```
+
+
+#### By somite stage and phenotype
+```{r}
+# Define QC pairs to plot
+QCs <- list(c("total_reads", "mapped_perc"),
+            c("mapped_perc", "nFeature_RNA"),
+            c("mapped_perc", "exonic_perc"),
+            c("mapped_perc", "intron_perc"),
+            c("mapped_perc", "intgen_perc"))
+# define categories for coloring
+categories <- c("Pheno", "SomSt_Simp")
+
+# Generate plots using lapply()
+P02d <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(all.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+
+# Arrange the plots
+P02d <- wrap_plots(P02d, ncol = 5) + plot_layout(guides = "collect")
+P02d
+```
+
+### Mitochondrial and ribosomal percentages
+#### By plate and sample
+```{r}
+# Define QC pairs to plot
+QCs <- list(c("percent.mt", "nCount_RNA"),
+            c("percent.rb", "nCount_RNA"),
+            c("percent.mt", "percent.rb"),
+            c("percent.mt", "mapped_perc"),
+            c("mapped_perc", "intgen_perc"))
+# define categories for coloring
+categories <- c("plateID", "sampleID")
+
+# Generate plots using lapply()
+P02e <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(all.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P02e <- wrap_plots(P02e, ncol = 5) + plot_layout(guides = "collect")
+P02e
+```
+
+#### By somite stage and phenotype
+```{r}
+# Define QC pairs to plot
+QCs <- list(c("percent.mt", "nCount_RNA"),
+            c("percent.rb", "nCount_RNA"),
+            c("percent.mt", "percent.rb"),
+            c("percent.mt", "mapped_perc"),
+            c("mapped_perc", "intgen_perc"))
+# define categories for coloring
+categories <- c("Pheno", "SomSt_Simp")
+
+# Generate plots using lapply()
+P02f <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(all.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P02f <- wrap_plots(P02f, ncol = 5) + plot_layout(guides = "collect")
+P02f
+```
+
+#Plot exp by gene
+## Feature contrib. per cell
+
+A few things about sparse matrices:
+- M <- all.SO[["RNA"]]$counts is a dgCMatrix which is a sparse format data matrix.
+- M@x is a vector with all the non-zero values of the matrix.
+- M@i is a vector with the row indices of the non-zero values in the matrix. (Indices
+start with 0, not 1)
+- M@p is a vector of length ncol(M)+1 with the cumulative number of non-zero values
+in the preceding columns.
+```{r}
+# Compute the proportion of counts of each gene per cell
+# Use sparse matrix operations, if your dataset is large, doing matrix devisions 
+#the regular way will take a very long time.
+
+#From NBIS course for scRNA-seq analysis, modified to make it more RAM cheap:
+#https://nbisweden.github.io/workshop-scRNAseq/labs/seurat/seurat_01_qc.html
+#C <- all.SO[["RNA"]]$counts
+#@x <- C@x / rep.int(colSums(C), diff(C@p)) * 100
+#most_expressed <- order(Matrix::rowSums(C), decreasing = T)[20:1]
+#P03 <- boxplot(as.matrix(t(C[most_expressed, ])),
+#               cex = 0.1, las = 1, xlab = "Percent counts per cell",
+#               col = viridis(20, option = "D"), horizontal = TRUE)
+#rm(C, most_expressed)
+
+#Extract count matrix
+P03 <- all.SO[["RNA"]]$counts %>%
+  #Calculate the percentage of all expression in a cell comes from each gene
+  { .@x <- .@x / rep.int(colSums(.), diff(.@p)) * 100; . } %>%
+  #Continue with only the top 20 expressed genes
+  { .[order(Matrix::rowSums(.), decreasing = TRUE)[1:20], ] } %>%
+  #Convert to dense format only after extracting a small subset of genes
+  as.data.frame() %>%
+  #Make long format
+  rownames_to_column(var = "gene") %>%
+  pivot_longer(cols = -gene, names_to = "cell", values_to = "percent") %>%
+  #reorder the levels of the gene factor
+  mutate(gene = factor(gene, levels = rev(unique(gene)))) %>%
+  #Plot
+  ggplot(aes(x = gene, y = percent, fill = gene)) +
+  geom_violin() +
+  scale_color_viridis(alpha = 0.1, option = "D") +
+  coord_flip() +
+  theme(text = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none")
+P03
+```
+
+## Dist of gene detection
+```{r}
+Matrix::rowSums(all.SO[["RNA"]]$counts > 0) %>% 
+  as.data.frame() %>% 
+  dplyr::rename(num_cells = ".") %>%
+  {.$num_cells} %>%
+  quantile(probs = c(0.1, 0.05, 0.01))
+```
+Genes that are detected in few cells are often removed in scRNA-seq analysis to 
+reduce the noise (variation that is random rather than biological) in the data. 
+Sometimes people apply cutoffs where they remove the bottom 10 or 5 percentiles. Here 
+I plot these values as vertical lines in histograms to visualize what I might 
+remove.
+
+```{r}
+P04 <- list(
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) %>% 
+  as.data.frame %>% 
+  dplyr::rename(num_cells = ".") %>%
+  ggplot(aes(x = num_cells)) +
+  #geom_density(fill = "blue", alpha = 0.5) +
+  geom_histogram(fill = "blue", alpha = 0.5, bins = 120) +
+  labs(title = "Density of detected genes per cell",
+       x = "Number of cells a gene is detected in",
+       y = "Density") +
+  geom_vline(xintercept = c(13, 4, 1)) +
+  theme_minimal() + 
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none"),
+  
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) %>%
+  as.data.frame %>% 
+  dplyr::rename(num_cells = ".") %>%
+  ggplot(aes(x = num_cells)) +
+  #geom_density(fill = "purple", alpha = 0.5) +
+  geom_histogram(fill = "purple", alpha = 0.5, bins = 120) +
+  scale_x_continuous(transform = "log1p") +
+  labs(title = "Density of detected genes per cell",
+       x = "Number of cells a gene is detected in (ln(x+1))",
+       y = "Density") +
+  geom_vline(xintercept = c(13, 4, 1)) +
+  theme_minimal() +
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none")
+)
+P04 <- wrap_plots(P04, ncol = 1)
+P04
+```
+
+## Total count vs detections in cells
+```{r}
+P05 <- cbind(Matrix::rowSums(all.SO[["RNA"]]$counts > 0),
+             Matrix::rowSums(all.SO[["RNA"]]$counts)) %>%
+  as.data.frame() %>%
+  dplyr::rename(num_cells = "V1", tot_exp = "V2") %>%
+  ggplot(aes(x = tot_exp, y = num_cells)) +
+  geom_point(alpha = .1, col = "blue") + 
+  scale_x_continuous(transform = "log1p") +
+  scale_y_continuous(transform = "log1p") +
+  geom_hline(yintercept = c(13, 4, 1)) +
+  labs(y = "Number of cells a gene is detected in (ln(x+1))",
+       x = "total expression (ln(x+1))") +
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45, hjust = 1))
+P05
+```
+
+# Filter
+```{r}
+# Define a list with the filter cutoff values
+f_vars <- list(nCount_RNA    = 1500, # This is needed for RNA-velocity
+               nFeature_RNA  = 1500,
+               nCount_ERCC   = 300,
+               nFeature_ERCC = NA,
+               mapped_perc   = 40,
+               exonic_perc   = 73,
+               intron_perc   = NA,
+               intgen_perc   = NA,
+               percent.mt    = 16,
+               percent.rb    = 7)
+```
+
+## Vissualize cell filters
+```{r}
+# Create a VlnPlot for each feature
+P06 <- lapply(seq_along(f_vars), function(i) {
+  p <- VlnPlot(all.SO, features = names(f_vars)[i], 
+               group.by = "SomSt_Simp", 
+               split.by = "Pheno", 
+               pt.size = .1, 
+               cols = c("brown", "green"),
+               assay = "RNA", layer = "counts")
+  
+  # Add geom_hline only if the value is not NA
+  if (!is.na(f_vars[[i]])) {
+    p <- p + geom_hline(yintercept = f_vars[[i]]) +
+      geom_text(aes(x = .2, y = f_vars[[i]], label = f_vars[[i]]), 
+                col = "black", hjust = 0, vjust = -0.5, 
+                size = 8*.35) # *.35 translates pt to mm
+  }
+  
+  #Make it pretty with themes
+  p + theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+
+# Combine all plots into a single plot
+P06 <- wrap_plots(P06, ncol = 5) + 
+  plot_layout(guides = "collect") +
+  plot_annotation("All data")
+# Display the combined plot
+P06
+```
+
+## Detection based filter
+By "detection based filtering" I mean removal of cells with low numbers of detected 
+genes and removal of genes that are detected in few cells. However, as I have not 
+found a good threshold for the removal of genes for smart-seq data, and because the 
+following analysis went well anyway I am not doing any removal of genes here. For 
+the purpose of this analysis that seems to be fine, but for the actual atlas this 
+will be important as genes that are detected in few cells can influence clustering 
+incorrectly and disproportionately.
+```{r}
+selected_c <- WhichCells(all.SO, 
+                         expression = nFeature_RNA > f_vars$nFeature_RNA)
+selected_f <- rownames(all.SO)[Matrix::rowSums(all.SO[["RNA"]]$counts > 0) >= 5]
+# This removes all genes that are detected in 4 or fewer cells, corresponding to
+#the 5th percentile. 
+
+#The actuall filtering happens here
+det.SO <- subset(all.SO, cells = selected_c, features = selected_f)
+
+rm(selected_c, selected_f)
+
+#Compare the unfiltered and filtered data sets
+dim(all.SO)
+dim(det.SO)
+print(paste0("Genes removed: ", dim(all.SO)[1] - dim(det.SO)[1]))
+print(paste0("Cells removed: ", dim(all.SO)[2] - dim(det.SO)[2]))
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+det.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+```
+
+## Targeted removal of genes
+```{r}
+#Remove mitochondrial genes
+#Define list of mitochondrial genes
+mito_genes <- c("ND1", "CYTB", "ND6", "ND5", "ND4",  #This is all mitochondrial
+                "ND4L", "ND3", "COX3", "ATP6",       #genes in mitochondrial 
+                "ATP8", "COX2", "COX1", "ND2")       #reference genome 
+selected_f <- rownames(det.SO)[!(rownames(det.SO) %in% mito_genes)]
+
+#Remove ribosomal genes
+selected_f <- selected_f[!grepl("^RP[SL]", selected_f)] # This removes all(?) rRNA
+
+# Remove all genes names UnnamedGeneX
+selected_f <- selected_f[!grepl("UnnamedGene", selected_f)]
+#By running "grep 'UnnamedGene' GCF_004329235.1_PodMur_1.0_genomic_mod.gtf | less -S"
+#I could see that these were all tRNA or rRNA
+
+# Filter
+det.SO <- subset(det.SO, features = selected_f)
+rm(selected_f, mito_genes); gc()
+
+#Compare the unfiltered and filtered data sets
+dim(all.SO)
+dim(det.SO)
+print(paste0("Genes removed: ", dim(all.SO)[1] - dim(det.SO)[1]))
+print(paste0("Cells removed: ", dim(all.SO)[2] - dim(det.SO)[2]))
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+det.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+```
+
+
+### Plot QCs after detection based filt
+```{r}
+# Create a VlnPlot for each feature
+P07 <- lapply(seq_along(f_vars), function(i) {
+  p <- VlnPlot(det.SO, features = names(f_vars)[i], 
+               group.by = "SomSt_Simp", 
+               split.by = "Pheno", 
+               pt.size = .1, 
+               cols = c("brown", "green"),
+               assay = "RNA", layer = "counts")
+  
+  # Add geom_hline only if the value is not NA
+  if (!is.na(f_vars[[i]]) & names(f_vars)[i] != "nFeature_RNA") {
+    p <- p + geom_hline(yintercept = f_vars[[i]]) +
+      geom_text(aes(x = .2, y = f_vars[[i]], label = f_vars[[i]]), 
+                col = "black", hjust = 0, vjust = -0.5, 
+                size = 8*.35) # *.35 translates pt to mm
+  }
+  
+  #Make it pretty with themes
+  p + theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+
+# Combine all plots into a single plot
+P07 <- wrap_plots(P07, ncol = 5) + 
+  plot_layout(guides = "collect") +
+  plot_annotation("Detection filtered data")
+# Display the combined plot
+P07
+```
+
+By only filtering based on nFeature_RNA most of the potential problems in the data is 
+already removed. Here I mainly mean the hump of cells with low values in nCount_RNA,
+mapped_perc and exonic_pers. This is good, it means that the QCs tell a coherent 
+story. I will do some additional filtering of the other QCs as well.
+
+## QC-metric filtering
+```{r}
+# Select cells
+selected_nCou <- WhichCells(det.SO, expression = nCount_RNA  > f_vars$nCount_RNA)
+selected_mito <- WhichCells(det.SO, expression = percent.mt  < f_vars$percent.mt)
+selected_mapp <- WhichCells(det.SO, expression = mapped_perc > f_vars$mapped_perc)
+selected_exon <- WhichCells(det.SO, expression = exonic_perc > f_vars$exonic_perc)
+selected_ERCC <- WhichCells(det.SO, expression = nCount_ERCC < f_vars$nCount_ERCC)
+selected_ribo <- WhichCells(det.SO, expression = percent.rb  > f_vars$percent.rb)
+# Eyeballing the dists I see no need for filtering based on percent ribosomal reads
+
+#and subset to only keep those cells
+filt.SO <- subset(det.SO, cells = Reduce(intersect, list(selected_nCou,
+                                                         selected_mito,
+                                                         selected_mapp,
+                                                         selected_exon,
+                                                         selected_ERCC,
+                                                         selected_ribo)))
+#Compare the unfiltered and filtered data sets
+dim(all.SO)
+dim(det.SO)
+dim(filt.SO)
+print(paste0("Genes removed (det based filt): ", dim(all.SO)[1] - dim(det.SO)[1]))
+print(paste0("Cells removed (det based filt): ", dim(all.SO)[2] - dim(det.SO)[2]))
+print(paste0("Add. cells removed (full filt): ", dim(det.SO)[2] - dim(filt.SO)[2]))
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+det.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+filt.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+rm(det.SO); gc()
+```
+
+## Filtering conclusions:
+Filtering out cells with few detected genes has a lot of carry over effect on many
+other QC-metrics. Additionally filtering on other QC-metrics after has only minor 
+carry over effects on the other QCs, but this filtering also results in the removal 
+of very few cells. The carry over effects are summarized bellow: 
+- Filtering on percent.mt does not affect the other metrics much. 
+- Filtering on mapped_perc also removes some outliers in intgen_perc but has 
+quite low overall influence. 
+- Filtering on exonic_perc removes some outlier in intron_perc and intgen_perc but 
+has quite low overall influence.
+- Filtering on percent.rb does not seem to have any carryover effect. 
+
+# Plot QCs after filter
+## Violins
+### By somite stage and phenotype
+```{r}
+# Create a VlnPlot for each feature
+P08 <- lapply(seq_along(feats), function(i) {
+  p <- VlnPlot(filt.SO, features = feats[i], 
+               group.by = "SomSt_Simp", 
+               split.by = "Pheno",
+               pt.size = .1,
+               cols = c("brown", "green"),
+               assay = "RNA", layer = "counts") +
+    theme(text = element_text(size = 6),
+          axis.title.x = element_blank(),
+          axis.title.y = element_text(size = 6),
+          axis.text = element_text(size = 6),
+          legend.text = element_text(size = 6),
+          legend.title = element_text(size = 6),
+          legend.key.size = unit(3, "mm"))
+  })
+# Combine all plots into a single plot
+P08 <- wrap_plots(P08, ncol = 5) + 
+  plot_layout(guides = "collect") +
+  plot_annotation("Filtered data")
+# Display the combined plot
+P08
+```
+
+## Scatter
+### Features and counts
+```{r}
+# Define QCs
+QCs <- list(c("nCount_RNA", "nFeature_RNA"),
+            c("nCount_ERCC", "nFeature_ERCC"),
+            c("nCount_ERCC", "nCount_RNA"),
+            c("nFeature_ERCC", "nFeature_RNA"))
+# Define categores for colouring
+categories <- c("Pheno", "SomSt_Simp")
+
+# Generate plots using lapply()
+P09 <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(filt.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P09 <- wrap_plots(P09, ncol = 4) + 
+  plot_layout(guides = "collect")
+P09
+```
+
+### Mapping percentages
+```{r}
+# Define QCs
+QCs <- list(c("total_reads", "mapped_perc"),
+            c("mapped_perc", "nCount_RNA"),
+            c("mapped_perc", "exonic_perc"),
+            c("mapped_perc", "intron_perc"),
+            c("mapped_perc", "intgen_perc"))
+# Define categores for colouring
+categories <- c("Pheno", "SomSt_Simp")
+
+# Generate plots using lapply()
+P10 <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(filt.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P10 <- wrap_plots(P10, ncol = 5) + 
+  plot_layout(guides = "collect")
+P10
+```
+
+### Mitochondrial and ribosomal percentages
+```{r}
+# Define QCs
+QCs <- list(c("percent.mt", "nCount_RNA"),
+            c("percent.rb", "nCount_RNA"),
+            c("percent.mt", "percent.rb"),
+            c("percent.mt", "mapped_perc"))
+# Define categores for colouring
+categories <- c("Pheno", "SomSt_Simp")
+
+# Generate plots using lapply()
+P11 <- lapply(categories, function(group_by) {
+  lapply(QCs, function(vars) {
+    FeatureScatter(filt.SO, vars[1], vars[2], group.by = group_by, 
+                   pt.size = 1 ) +
+      scale_color_viridis_d(option = "D", alpha = 0.1) +
+      theme(text = element_text(size = 6),
+            axis.title.x = element_text(size = 6),
+            axis.title.y = element_text(size = 6),
+            axis.text = element_text(size = 6, angle = 45),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+}) %>% unlist(recursive = FALSE)  # Flatten the list
+rm(QCs, categories)
+
+# Arrange the plots
+P11 <- wrap_plots(P11, ncol = 4) + 
+  plot_layout(guides = "collect")
+P11
+```
+
+# Plot exp by gene after filt
+## Feature contrib. per cell
+```{r}
+#Extract count matrix
+P12 <- filt.SO[["RNA"]]$counts %>%
+  #Calculate the percentage of all expression in a cell comes from each gene
+  { .@x <- .@x / rep.int(colSums(.), diff(.@p)) * 100; . } %>%
+  #Continue with only the top 20 expressed genes
+  { .[order(Matrix::rowSums(.), decreasing = TRUE)[1:20], ] } %>%
+  #Convert to dense format only after extracting a small subset of genes
+  as.data.frame() %>%
+  #Make long format
+  rownames_to_column(var = "gene") %>%
+  pivot_longer(cols = -gene, names_to = "cell", values_to = "percent") %>%
+  #reorder the levels of the gene factor
+  mutate(gene = factor(gene, levels = rev(unique(gene)))) %>%
+  #Plot
+  ggplot(aes(x = gene, y = percent, fill = gene)) +
+  geom_violin() +
+  scale_color_viridis(alpha = 0.1, option = "D") +
+  coord_flip() +
+  theme(text = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none")
+P12
+```
+ACTB - Embryonic stem cell gene (Han et al 2018)
+
+Again, but only meaningfull gene names
+```{r}
+#Extract count matrix
+P12b <- filt.SO[["RNA"]]$counts %>%
+  #Calculate the percentage of all expression in a cell comes from each gene
+  { .@x <- .@x / rep.int(colSums(.), diff(.@p)) * 100; . } %>%
+  # Select rows with meaningful gene names (not starting with "LOC")
+  { .[!grepl("^LOC", rownames(.)), ] } %>%   # This is the row that is not working
+  #Continue with only the top 20 expressed genes
+  { .[order(Matrix::rowSums(.), decreasing = TRUE)[1:20], ] } %>%
+  #Convert to dense format only after extracting a small subset of genes
+  as.data.frame() %>%
+  #Make long format
+  rownames_to_column(var = "gene") %>%
+  pivot_longer(cols = -gene, names_to = "cell", values_to = "percent") %>%
+  #reorder the levels of the gene factor
+  mutate(gene = factor(gene, levels = rev(unique(gene)))) %>%
+  #Plot
+  ggplot(aes(x = gene, y = percent, fill = gene)) +
+  geom_violin() +
+  scale_color_viridis(alpha = 0.1, option = "D") +
+  coord_flip() +
+  theme(text = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none")
+P12b
+```
+
+## Dist of gene detection
+```{r}
+P13 <- list(
+  Matrix::rowSums(filt.SO[["RNA"]]$counts > 0) %>% 
+  as.data.frame %>% 
+  dplyr::rename(num_cells = ".") %>%
+  ggplot(aes(x = num_cells)) +
+  #geom_density(fill = "blue", alpha = 0.5) +
+  geom_histogram(fill = "blue", alpha = 0.5, bins = 120) +
+  labs(title = "Density of detected genes per cell",
+       x = "Number of cells a gene is detected in",
+       y = "Density") +
+  #geom_vline(xintercept = c(13, 4, 1)) +
+  theme_minimal() + 
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none"),
+  
+  Matrix::rowSums(filt.SO[["RNA"]]$counts > 0) %>% 
+  as.data.frame %>% 
+  dplyr::rename(num_cells = ".") %>%
+  ggplot(aes(x = num_cells)) +
+  #geom_density(fill = "purple", alpha = 0.5) +
+  geom_histogram(fill = "purple", alpha = 0.5, bins = 120) +
+  scale_x_continuous(transform = "log1p") +
+  labs(title = "Density of detected genes per cell",
+       x = "Number of cells a gene is detected in (ln(x+1))",
+       y = "Density") +
+  #geom_vline(xintercept = c(13, 4, 1)) +
+  theme_minimal() +
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none")
+)
+P13 <- wrap_plots(P13, ncol = 1)
+P13
+```
+
+## Total count vs detections
+```{r}
+P14 <- cbind(Matrix::rowSums(filt.SO[["RNA"]]$counts > 0),
+             Matrix::rowSums(filt.SO[["RNA"]]$counts)) %>%
+  as.data.frame() %>%
+  dplyr::rename(num_cells = "V1", tot_exp = "V2") %>%
+  ggplot(aes(x = tot_exp, y = num_cells)) +
+  geom_point(alpha = .1, col = "blue") + 
+  scale_x_continuous(transform = "log1p") +
+  scale_y_continuous(transform = "log1p") +
+  #geom_hline(yintercept = c(13, 4, 1)) +
+  labs(y = "Number of cells a gene is detected in (ln(x+1))",
+       x = "total expression (ln(x+1))") +
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45, hjust = 1))
+P14
+```
+
+# Calc Cell cycle scores
+## Prep SO for CC-scoring
+```{r}
+# Normalize and scale data and find variable features (all in SCTransform())
+filt.SO <- SCTransform(filt.SO,
+                       assay = 'RNA',
+                       new.assay.name = 'SCT_prel',
+                       vars.to.regress = c('percent.mt'),
+                       vst.flavor = "v2",
+                       variable.features.n = 3000) #3000 is default
+```
+
+## Find Lizard S and G2M orthos
+```{r}
+Ortho.df <- read.csv(file=paste0("C:/Users/robin/OneDrive - Lund University/",
+                     "PhD_RobinPranter/01_Projects/04_NCCEnrichmentMethod/",
+                     "06_10XAnalysis/",
+                     "Pmur1.0Human_OrthoTable_BioMartManDL20241206.txt"))
+# Save S and G2M markers in Pmur
+G2M.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                        cc.genes.updated.2019$g2m.genes, ]$Gene.name
+S.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                      cc.genes.updated.2019$s.genes, ]$Gene.name
+
+#Check that the markers are present in the data
+print(paste0(filt.SO %>% Features() %in% G2M.genes %>% sum(), "/",
+             G2M.genes %>% length(), 
+             " G2M-markers are present in the data"))
+print(paste0(filt.SO %>% Features() %in% S.genes %>% sum(), "/",
+             S.genes %>% length(), 
+             " S-markers are present in the data"))
+
+#Subset only the genes that are present
+G2M.genes <- G2M.genes[G2M.genes %in% Features(filt.SO)]
+S.genes <- S.genes[S.genes %in% Features(filt.SO)]
+```
+
+## Calc score
+```{r}
+# Perform cell cycle analysis (make sure to specify the "assay" parameter
+filt.SO <- CellCycleScoring(filt.SO,
+                            s.features = S.genes,
+                            g2m.features = G2M.genes,
+                            assay = 'SCT_prel',
+                            set.ident = FALSE)
+```
+
+```{r}
+P15 <- VlnPlot(filt.SO, features = c("S.Score", "G2M.Score"), 
+               group.by = "Pheno", 
+               split.by = "SomSt_Simp", 
+               pt.size = .1) &
+  theme(text = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45))
+P15
+```
+
+```{r}
+P16 <- wrap_plots(FeatureScatter(filt.SO, "S.Score", "G2M.Score", group.by = "Phase", 
+                      split.by = "Pheno"),
+                  FeatureScatter(filt.SO, "S.Score", "G2M.Score", group.by = "Phase", 
+                      split.by = "SomSt_Simp")) +
+  plot_layout(guides = "collect") &
+  theme(text = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45))
+P16
+```
+
+```{r}
+P16b <- filt.SO@meta.data %>%
+  
+  select(Pheno, SomSt_Simp, Phase) %>%
+  group_by(Pheno, SomSt_Simp, Phase) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(Pheno, SomSt_Simp) %>%
+  mutate(freq = n / sum(n)) %>%
+  
+  ggplot(aes(x = Pheno, y = freq, fill = Phase)) +
+  geom_bar(stat = "identity", position = "stack") +
+  facet_grid(. ~ SomSt_Simp, scales = "free_x", space = "free_x")
+  
+P16b
+```
+
+# Plot meta data in reduced dims
+## Normalize data
+Normalize data using SCTransform() which also finds variable features and scales the
+data. Regres out variation associated with percent mt and cell cykle scores.
+```{r}
+#Reset default assay to the raw RNA counts
+DefaultAssay(filt.SO) <- "RNA"
+#Delete the preliminare normalization
+filt.SO[["SCT_prel"]]     <- NULL
+filt.SO$nCount_SCT_prel   <- NULL
+filt.SO$nFeature_SCT_prel <- NULL
+
+# Normalize, transform and select variable features
+filt.SO <- SCTransform(filt.SO,                 
+                       new.assay.name = "SCT_Reg",       
+                       vars.to.regress = c("percent.mt", "G2M.Score", "S.Score"),
+                       vst.flavor = "v2",
+                       variable.features.n = 3000) #3000 is default
+gc()
+```
+
+## Check normalization
+```{r}
+P23 <- cbind(Matrix::rowSums(filt.SO[["RNA"]]$counts)[
+                                              rownames(filt.SO[["RNA"]]$counts) %in% 
+                                              rownames(filt.SO[["SCT_Reg"]]$data)],
+             Matrix::rowSums(filt.SO[["SCT_Reg"]]$data)) %>%
+  as.data.frame() %>%
+  dplyr::rename(raw = "V1", norm = "V2") %>%
+  ggplot(aes(raw, norm)) +
+  geom_point() +
+  labs(title = "Normalized data vs raw counts (each dot is a gene)") +
+  theme(text = element_text(size = 6))
+P23
+```
+
+```{r}
+rownames(filt.SO[["RNA"]]$counts)[Matrix::rowSums(filt.SO[["RNA"]]$counts)> 1000000]
+```
+
+
+## Check VF selection
+```{r}
+top20 <- VariableFeatures(filt.SO) %>% head(20)
+P24 <- VariableFeaturePlot(filt.SO) %>% 
+  LabelPoints(points = top20, repel = TRUE, xnudge = 0, ynudge = 0) +
+  theme(text = element_text(size = 6))
+P24
+```
+
+##Dimensionality reduction
+### PCA
+```{r}
+filt.SO <- RunPCA(filt.SO)
+```
+
+#### Check PCA
+```{r}
+P25 <- VizDimLoadings(filt.SO, dims = 1:5, reduction = "pca", 
+                      ncol = 5, balanced = T) &
+  theme(text = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45))
+P25
+```
+
+```{r}
+P26 <- ElbowPlot(filt.SO, reduction = "pca", ndims = 50)
+P26
+```
+
+```{r}
+#library(scater)
+#as.SingleCellExperiment(filt.SO) %>% 
+#  scater::plotExplanatoryPCs(nvars_to_plot = colnames(filt.SO@meta.data),
+#                            npcs_to_plot = 20)
+```
+
+
+```{r}
+#Reduce dimensions
+filt.SO <- RunTSNE(filt.SO, reduction = "pca", dims = 1:15)
+filt.SO <- RunUMAP(filt.SO, reduction = "pca", dims = 1:15)
+```
+
+```{r}
+feats_long <- c(feats, "total_reads", "S.Score", "G2M.Score", 
+                "nCount_SCT_Reg", "nFeature_SCT_Reg")
+
+P17 <- FeaturePlot(filt.SO, reduction = "pca", 
+                   features = feats_long,
+                   pt.size = .1, alpha = .5) &
+  theme(text         = element_text(size = 6),
+        axis.text    = element_text(size = 6, angle = 45),
+        legend.key.size = unit(3, "mm"))
+P17
+```
+
+```{r}
+P18 <- FeaturePlot(filt.SO, reduction = "tsne", 
+                   features = feats_long,
+                   pt.size = .1, alpha = .5) &
+  theme(text         = element_text(size = 6),
+        axis.text    = element_text(size = 6, angle = 45),
+        legend.key.size = unit(3, "mm"))
+P18
+```
+
+```{r}
+P19 <- FeaturePlot(filt.SO, reduction = "umap", 
+                   features = feats_long,
+                   pt.size = .1, alpha = .5) & NoLegend() &
+  theme(text         = element_text(size = 6),
+        axis.text    = element_text(size = 6, angle = 45),
+        #legend.key.size = unit(3, "mm")
+        )
+P19
+```
+## Conclusions:
+The QCs don't distribute weirdly in the reduced dimensions. However, the cell cycle 
+phase scores do and should perhaps be regressed out. 
+
+# Plot groupings in reduced dims
+```{r}
+groups <- c("Pheno", "SomSt_Simp", "Phase", "plateID", "sampleID")
+
+P20a <- lapply(groups, function(var) {
+  DimPlot(filt.SO, reduction = "pca", group.by = var, 
+          dims = 1:2, alpha = .1, pt.size = 1, shuffle = TRUE) + 
+    theme(text = element_text(size = 6),
+          axis.text = element_text(size = 6, angle = 45),
+          legend.key.size = unit(1, "mm"))
+  })
+P20b <- lapply(groups, function(var) {
+  DimPlot(filt.SO, reduction = "pca", group.by = var, 
+          dims = 3:4, alpha = .1, pt.size = 1, shuffle = TRUE) + 
+    theme(text = element_text(size = 6),
+          axis.text = element_text(size = 6, angle = 45),
+          legend.key.size = unit(1, "mm"))
+  })
+P20c <- lapply(groups, function(var) {
+  DimPlot(filt.SO, reduction = "pca", group.by = var, 
+          dims = 5:6, alpha = .1, pt.size = 1, shuffle = TRUE) + 
+    theme(text = element_text(size = 6),
+          axis.text = element_text(size = 6, angle = 45),
+          legend.key.size = unit(1, "mm"))
+  })
+
+P20 <- wrap_plots(c(P20a, P20b, P20c), ncol = 5) + 
+  plot_layout(guides = "collect")
+rm(P20a, P20b, P20c)
+P20
+```
+
+```{r}
+groups <- c("Pheno", "SomSt_Simp", "Phase", "plateID", "sampleID")
+
+P21 <- lapply(groups, function(var) {
+  DimPlot(filt.SO, reduction = "tsne", group.by = var, 
+          dims = 1:2, alpha = .1, pt.size = 1, shuffle = TRUE) + 
+    theme(text = element_text(size = 6),
+          axis.text = element_text(size = 6, angle = 45),
+          legend.key.size = unit(3, "mm"))
+  })
+
+P21 <- wrap_plots(P21, ncol = 3) + 
+  plot_layout(guides = "collect") 
+P21
+```
+
+```{r}
+groups <- c("Pheno", "SomSt_Simp", "Phase", "plateID", "sampleID")
+
+P22 <- lapply(groups, function(var) {
+  DimPlot(filt.SO, reduction = "umap", group.by = var, 
+          dims = 1:2, alpha = .1, pt.size = 1, shuffle = TRUE) + 
+    theme(text = element_text(size = 6),
+          axis.text = element_text(size = 6, angle = 45),
+          legend.key.size = unit(3, "mm"))
+  })
+
+P22 <- wrap_plots(P22, ncol = 3) + 
+  plot_layout(guides = "collect") 
+P22
+```
+## Conclusions:
+It is a bit tricky to get a feeling for if the technical groupings (plateID and 
+sampleID) are distributed well in the reduced dimension space since they are so many,
+that they are difficult to view. They do however seem to distribute well. 
+The biological "treatment" groupings (Pheno and SomSt_Simp) mostly overlap but do 
+separate a bit. Somite stage separate more than phenotype, with the youngest stage 
+occupying the smallest part of transcription space. This is expected and good. 
+Phase (cell cycle phase) which is calculated from the data separates a lot in in the 
+reduced dimensions transcription space. This means that we should probably regress 
+out the variation associated with cell cycle which was already concluded from the 
+plotting of the cell cycle scores above.
+
+# Save data
+Save the filtered data and meta data in an RDS file to be read by the next script in
+the pipeline (03_Clulster.Rmd)
+```{r}
+filt.SO
+saveRDS(filt.SO, paste0(path, 
+                       "03_AnalysisAllData/02_QCFilter_output_", 
+                       Sys.Date(),
+                       ".Rds"))
+```
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+```

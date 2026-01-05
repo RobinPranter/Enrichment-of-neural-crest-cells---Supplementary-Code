@@ -1,0 +1,479 @@
+---
+title: "Compile data"
+author: "Robin Pranter"
+date: "2025-03-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+rm(list= ls()); gc()
+start_time <- Sys.time()
+
+#library(future) #apparently already loaded with library(Seurat)
+#plan("multisession", workers = 14) # My machine has 14 cores and 20 threads. 
+#plan()                             # However, looking at the task manager while 
+                                   # running SCTransform, it does not appear to 
+                                   # efficiently use 19 workers.
+
+# OBS Seurat V5 no longer support parallel computing through future 
+# https://github.com/satijalab/seurat/issues/9780#issuecomment-2762207913
+
+options(future.globals.maxSize = 60000*(1024^2)) # 32000*1024^2 is my machines total
+Sys.setenv(R_MAX_VSIZE = "60Gb")                 # by leaving 4GB of margin for 
+                                                 # unexpected memory peaks I avoid 
+                                                 # crashing the computer
+
+path <- paste0("C:/Users/pranter/Desktop/Transfer20251124/", 
+               "PhD_RobinPranter/01_Projects/01_NCCAtlas/02_Drylab/")
+
+# Load libraries
+library(Seurat)
+library(tidyverse)
+```
+
+#Prep seurat object
+Here I will 1. read the dge expression matrices, 2. create one seurat object per 
+expression matrix, 3. add meta data, 4. merge all seurat objects into one and 5. 
+further add some meta data.
+
+
+## Read expression data
+Here I read in the P30915_111.dgecounts.rds files for each plate. The files are 
+big and by only reading in one of the multiple matrices I save a lot of RAM. Be 
+mindful about which matrix to read!
+
+Now I read all inex (intron + exon) mapped UMI-counts.
+```{r}
+#Read data
+## First delivery
+raw_counts_P01 <- readRDS(paste0(path, 
+              "01_Data/P30915_101/P30915_101.dgecounts.rds"))$umicount$inex$all
+raw_counts_P02 <- readRDS(paste0(path, 
+              "01_Data/P30915_103/P30915_103.dgecounts.rds"))$umicount$inex$all
+raw_counts_P03 <- readRDS(paste0(path, 
+              "01_Data/P30915_105/P30915_105.dgecounts.rds"))$umicount$inex$all
+raw_counts_P04 <- readRDS(paste0(path, 
+              "01_Data/P30915_107/P30915_107.dgecounts.rds"))$umicount$inex$all
+raw_counts_P05 <- readRDS(paste0(path, 
+              "01_Data/P30915_109/P30915_109.dgecounts.rds"))$umicount$inex$all
+raw_counts_P06 <- readRDS(paste0(path, 
+              "01_Data/P30915_111/P30915_111.dgecounts.rds"))$umicount$inex$all
+
+## Second delivery
+raw_counts_P07 <- readRDS(paste0(path, 
+              "01_Data/P32812_101/P32812_101.dgecounts.rds"))$umicount$inex$all
+raw_counts_P09 <- readRDS(paste0(path, 
+              "01_Data/P32812_105/P32812_105.dgecounts.rds"))$umicount$inex$all
+
+## Third delivery
+raw_counts_P08 <- readRDS(paste0(path, 
+              "01_Data/P32812_103/P32812_103.dgecounts.rds"))$umicount$inex$all
+raw_counts_P10 <- readRDS(paste0(path, 
+              "01_Data/P32812_107/P32812_107.dgecounts.rds"))$umicount$inex$all
+raw_counts_P11 <- readRDS(paste0(path, 
+              "01_Data/P32812_109/P32812_109.dgecounts.rds"))$umicount$inex$all
+raw_counts_P12 <- readRDS(paste0(path, 
+              "01_Data/P32812_111/P32812_111.dgecounts.rds"))$umicount$inex$all
+raw_counts_P13 <- readRDS(paste0(path, 
+              "01_Data/P32812_113/P32812_113.dgecounts.rds"))$umicount$inex$all
+raw_counts_P14 <- readRDS(paste0(path, 
+              "01_Data/P32812_117/P32812_117.dgecounts.rds"))$umicount$inex$all
+raw_counts_P15 <- readRDS(paste0(path, 
+              "01_Data/P32812_119/P32812_119.dgecounts.rds"))$umicount$inex$all
+raw_counts_P16 <- readRDS(paste0(path, 
+              "01_Data/P32812_121/P32812_121.dgecounts.rds"))$umicount$inex$all
+raw_counts_P17 <- readRDS(paste0(path, 
+              "01_Data/P32812_123/P32812_123.dgecounts.rds"))$umicount$inex$all
+raw_counts_P18 <- readRDS(paste0(path, 
+              "01_Data/P32812_125/P32812_125.dgecounts.rds"))$umicount$inex$all
+raw_counts_P19 <- readRDS(paste0(path, 
+              "01_Data/P32812_127/P32812_127.dgecounts.rds"))$umicount$inex$all
+raw_counts_P20 <- readRDS(paste0(path, 
+              "01_Data/P32812_129/P32812_129.dgecounts.rds"))$umicount$inex$all
+raw_counts_P21 <- readRDS(paste0(path, 
+              "01_Data/P32812_131/P32812_131.dgecounts.rds"))$umicount$inex$all
+raw_counts_P22 <- readRDS(paste0(path, 
+              "01_Data/P32812_133/P32812_133.dgecounts.rds"))$umicount$inex$all
+raw_counts_P23 <- readRDS(paste0(path, 
+              "01_Data/P32812_135/P32812_135.dgecounts.rds"))$umicount$inex$all
+```
+
+## Create Seurat objects
+```{r}
+# Separate gene and ERCC spike-in reads
+ercc_counts_P01 <- raw_counts_P01[ grepl("^ERCC", rownames(raw_counts_P01)),]
+gene_counts_P01 <- raw_counts_P01[!grepl("^ERCC", rownames(raw_counts_P01)),]
+
+ercc_counts_P02 <- raw_counts_P02[ grepl("^ERCC", rownames(raw_counts_P02)),]
+gene_counts_P02 <- raw_counts_P02[!grepl("^ERCC", rownames(raw_counts_P02)),]
+
+ercc_counts_P03 <- raw_counts_P03[ grepl("^ERCC", rownames(raw_counts_P03)),]
+gene_counts_P03 <- raw_counts_P03[!grepl("^ERCC", rownames(raw_counts_P03)),]
+
+ercc_counts_P04 <- raw_counts_P04[ grepl("^ERCC", rownames(raw_counts_P04)),]
+gene_counts_P04 <- raw_counts_P04[!grepl("^ERCC", rownames(raw_counts_P04)),]
+
+ercc_counts_P05 <- raw_counts_P05[ grepl("^ERCC", rownames(raw_counts_P05)),]
+gene_counts_P05 <- raw_counts_P05[!grepl("^ERCC", rownames(raw_counts_P05)),]
+
+ercc_counts_P06 <- raw_counts_P06[ grepl("^ERCC", rownames(raw_counts_P06)),]
+gene_counts_P06 <- raw_counts_P06[!grepl("^ERCC", rownames(raw_counts_P06)),]
+
+ercc_counts_P07 <- raw_counts_P07[ grepl("^ERCC", rownames(raw_counts_P07)),]
+gene_counts_P07 <- raw_counts_P07[!grepl("^ERCC", rownames(raw_counts_P07)),]
+
+ercc_counts_P08 <- raw_counts_P08[ grepl("^ERCC", rownames(raw_counts_P08)),]
+gene_counts_P08 <- raw_counts_P08[!grepl("^ERCC", rownames(raw_counts_P08)),]
+
+ercc_counts_P09 <- raw_counts_P09[ grepl("^ERCC", rownames(raw_counts_P09)),]
+gene_counts_P09 <- raw_counts_P09[!grepl("^ERCC", rownames(raw_counts_P09)),]
+
+ercc_counts_P10 <- raw_counts_P10[ grepl("^ERCC", rownames(raw_counts_P10)),]
+gene_counts_P10 <- raw_counts_P10[!grepl("^ERCC", rownames(raw_counts_P10)),]
+
+ercc_counts_P11 <- raw_counts_P11[ grepl("^ERCC", rownames(raw_counts_P11)),]
+gene_counts_P11 <- raw_counts_P11[!grepl("^ERCC", rownames(raw_counts_P11)),]
+
+ercc_counts_P12 <- raw_counts_P12[ grepl("^ERCC", rownames(raw_counts_P12)),]
+gene_counts_P12 <- raw_counts_P12[!grepl("^ERCC", rownames(raw_counts_P12)),]
+
+ercc_counts_P13 <- raw_counts_P13[ grepl("^ERCC", rownames(raw_counts_P13)),]
+gene_counts_P13 <- raw_counts_P13[!grepl("^ERCC", rownames(raw_counts_P13)),]
+
+ercc_counts_P14 <- raw_counts_P14[ grepl("^ERCC", rownames(raw_counts_P14)),]
+gene_counts_P14 <- raw_counts_P14[!grepl("^ERCC", rownames(raw_counts_P14)),]
+
+ercc_counts_P15 <- raw_counts_P15[ grepl("^ERCC", rownames(raw_counts_P15)),]
+gene_counts_P15 <- raw_counts_P15[!grepl("^ERCC", rownames(raw_counts_P15)),]
+
+ercc_counts_P16 <- raw_counts_P16[ grepl("^ERCC", rownames(raw_counts_P16)),]
+gene_counts_P16 <- raw_counts_P16[!grepl("^ERCC", rownames(raw_counts_P16)),]
+
+ercc_counts_P17 <- raw_counts_P17[ grepl("^ERCC", rownames(raw_counts_P17)),]
+gene_counts_P17 <- raw_counts_P17[!grepl("^ERCC", rownames(raw_counts_P17)),]
+
+ercc_counts_P18 <- raw_counts_P18[ grepl("^ERCC", rownames(raw_counts_P18)),]
+gene_counts_P18 <- raw_counts_P18[!grepl("^ERCC", rownames(raw_counts_P18)),]
+
+ercc_counts_P19 <- raw_counts_P19[ grepl("^ERCC", rownames(raw_counts_P19)),]
+gene_counts_P19 <- raw_counts_P19[!grepl("^ERCC", rownames(raw_counts_P19)),]
+
+ercc_counts_P20 <- raw_counts_P20[ grepl("^ERCC", rownames(raw_counts_P20)),]
+gene_counts_P20 <- raw_counts_P20[!grepl("^ERCC", rownames(raw_counts_P20)),]
+
+ercc_counts_P21 <- raw_counts_P21[ grepl("^ERCC", rownames(raw_counts_P21)),]
+gene_counts_P21 <- raw_counts_P21[!grepl("^ERCC", rownames(raw_counts_P21)),]
+
+ercc_counts_P22 <- raw_counts_P22[ grepl("^ERCC", rownames(raw_counts_P22)),]
+gene_counts_P22 <- raw_counts_P22[!grepl("^ERCC", rownames(raw_counts_P22)),]
+
+ercc_counts_P23 <- raw_counts_P23[ grepl("^ERCC", rownames(raw_counts_P23)),]
+gene_counts_P23 <- raw_counts_P23[!grepl("^ERCC", rownames(raw_counts_P23)),]
+
+#Remove spacious objects
+rm(raw_counts_P01, raw_counts_P02, raw_counts_P03, raw_counts_P04, raw_counts_P05,
+   raw_counts_P06, raw_counts_P07, raw_counts_P08, raw_counts_P09, raw_counts_P10,
+   raw_counts_P11, raw_counts_P12, raw_counts_P13, raw_counts_P14, raw_counts_P15,
+   raw_counts_P16, raw_counts_P17, raw_counts_P18, raw_counts_P19, raw_counts_P20,
+   raw_counts_P21, raw_counts_P22, raw_counts_P23); gc()
+
+# Create seurat objects
+plate01_SO <- CreateSeuratObject(counts = gene_counts_P01, project = "Plate_01")
+plate02_SO <- CreateSeuratObject(counts = gene_counts_P02, project = "Plate_02")
+plate03_SO <- CreateSeuratObject(counts = gene_counts_P03, project = "Plate_03")
+plate04_SO <- CreateSeuratObject(counts = gene_counts_P04, project = "Plate_04")
+plate05_SO <- CreateSeuratObject(counts = gene_counts_P05, project = "Plate_05")
+plate06_SO <- CreateSeuratObject(counts = gene_counts_P06, project = "Plate_06")
+plate07_SO <- CreateSeuratObject(counts = gene_counts_P07, project = "Plate_07")
+plate08_SO <- CreateSeuratObject(counts = gene_counts_P08, project = "Plate_08")
+plate09_SO <- CreateSeuratObject(counts = gene_counts_P09, project = "Plate_09")
+plate10_SO <- CreateSeuratObject(counts = gene_counts_P10, project = "Plate_10")
+plate11_SO <- CreateSeuratObject(counts = gene_counts_P11, project = "Plate_11")
+plate12_SO <- CreateSeuratObject(counts = gene_counts_P12, project = "Plate_12")
+plate13_SO <- CreateSeuratObject(counts = gene_counts_P13, project = "Plate_13")
+plate14_SO <- CreateSeuratObject(counts = gene_counts_P14, project = "Plate_14")
+plate15_SO <- CreateSeuratObject(counts = gene_counts_P15, project = "Plate_15")
+plate16_SO <- CreateSeuratObject(counts = gene_counts_P16, project = "Plate_16")
+plate17_SO <- CreateSeuratObject(counts = gene_counts_P17, project = "Plate_16")
+plate18_SO <- CreateSeuratObject(counts = gene_counts_P18, project = "Plate_18")
+plate19_SO <- CreateSeuratObject(counts = gene_counts_P19, project = "Plate_19")
+plate20_SO <- CreateSeuratObject(counts = gene_counts_P20, project = "Plate_20")
+plate21_SO <- CreateSeuratObject(counts = gene_counts_P21, project = "Plate_21")
+plate22_SO <- CreateSeuratObject(counts = gene_counts_P22, project = "Plate_22")
+plate23_SO <- CreateSeuratObject(counts = gene_counts_P23, project = "Plate_23")
+
+#Remove spacious objects
+rm(gene_counts_P01, gene_counts_P02, gene_counts_P03, gene_counts_P04,
+   gene_counts_P05, gene_counts_P06, gene_counts_P07, gene_counts_P08,
+   gene_counts_P09, gene_counts_P10, gene_counts_P11, gene_counts_P12,
+   gene_counts_P13, gene_counts_P14, gene_counts_P15, gene_counts_P16,
+   gene_counts_P17, gene_counts_P18, gene_counts_P19, gene_counts_P20,
+   gene_counts_P21, gene_counts_P22, gene_counts_P23); gc()
+
+# Add a secondary assay with the ERCC reads
+plate01_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P01)
+plate02_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P02)
+plate03_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P03)
+plate04_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P04)
+plate05_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P05)
+plate06_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P06)
+plate07_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P07)
+plate08_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P08)
+plate09_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P09)
+plate10_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P10)
+plate11_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P11)
+plate12_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P12)
+plate13_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P13)
+plate14_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P14)
+plate15_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P15)
+plate16_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P16)
+plate17_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P17)
+plate18_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P18)
+plate19_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P19)
+plate20_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P20)
+plate21_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P21)
+plate22_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P22)
+plate23_SO[["ERCC"]] = CreateAssayObject(counts = ercc_counts_P23)
+
+rm(ercc_counts_P01, ercc_counts_P02, ercc_counts_P03, ercc_counts_P04,
+   ercc_counts_P05, ercc_counts_P06, ercc_counts_P07, ercc_counts_P08,
+   ercc_counts_P09, ercc_counts_P10, ercc_counts_P11, ercc_counts_P12,
+   ercc_counts_P13, ercc_counts_P14, ercc_counts_P15, ercc_counts_P16,
+   ercc_counts_P17, ercc_counts_P18, ercc_counts_P19, ercc_counts_P20,
+   ercc_counts_P21, ercc_counts_P22, ercc_counts_P23); gc()
+```
+
+
+## Add meta data
+### Plate ID
+```{r}
+# Add the wetlab plate IDs to each seurat object
+plates <- c("P30915_101", "P30915_103", "P30915_105", "P30915_107", "P30915_109", 
+            "P30915_111", "P32812_101", "P32812_103", "P32812_105", "P32812_107", 
+            "P32812_109", "P32812_111", "P32812_113", "P32812_117", "P32812_119", 
+            "P32812_121", "P32812_123", "P32812_125", "P32812_127", "P32812_129", 
+            "P32812_131", "P32812_133", "P32812_135")
+
+for (i in 1:length(plates)) {
+  plate_id <- plates[i]
+  plate_so_name <- paste0("plate", sprintf("%02d", i), "_SO")
+  plate_so <- get(plate_so_name)
+  plate_so$plateID <- plate_id
+  assign(plate_so_name, plate_so)
+}
+rm(plate_id, plate_so_name, plate_so); gc()
+```
+
+### Well ID & exp metadata
+The experimental metadata includes embryo ID, phenotype of the parents and somite
+stage.
+```{r}
+for (i in 1:length(plates)) {
+  plate_id <- plates[i]  # Get the plate ID string
+  
+  # Read the well barcode file
+  temp_path <- paste0(path, "01_Data/", plate_id,"/", plate_id, ".well_barcodes.txt")
+  bc_well_df <- read.table(temp_path, header = FALSE, skip = 2, 
+                           col.names = c("BC", "WellID"))
+  
+  # Read the experimental metadata file
+  temp_path <- paste0(path, "01_Data/", plate_id,"/", plate_id, "_exp_metadata.csv")
+  exp_meta_df <- read.table(temp_path, header = TRUE, sep = ",") %>%
+    select(c(sampleID, WellID, Pheno, SomSt, FACS_d)) 
+    #Some (but not all) metadata files have additional columns with flow cyt data.
+    #This row removes those.
+  
+  # Merge the well ID df and the experimental metadata df
+  merged_df <- merge(bc_well_df, exp_meta_df, by = "WellID")
+  
+  # Set rownames (needed for AddMetaData()) and remove BC-column
+  rownames(merged_df) <- merged_df$BC
+  merged_df$BC <- NULL
+  
+  # Create the Seurat object variable name dynamically
+  plate_so_name <- paste0("plate", sprintf("%02d", i), "_SO")
+  
+  # Assign metadata to the Seurat object (get() calls an object using a string)
+  plate_so <- AddMetaData(get(plate_so_name), metadata = merged_df)
+  
+  # Assign the temporary seurat objects to permanent ones dynamically
+  assign(plate_so_name, plate_so)
+}
+rm(i, plate_id, temp_path, bc_well_df, exp_meta_df, 
+   merged_df, plate_so_name, plate_so); gc()
+
+# The metadata files are written manually following the notes in the lab book. In 
+# some simple cases (where all wells got cells from the same embryo) it was written 
+#like this:
+#
+#x <- c()
+#for (i in 1:16){
+#     for (j in 1:24){
+#         x <- append(x, paste0(LETTERS[i], j))
+#     }
+# }
+#
+#as.data.frame(list(x,
+#                    c(rep("SMA32_C1_E4_2023", 382), "none", "none"), 
+#                    c(rep("green", 382), NA, NA), 
+#                    c(rep("21ss", 382), NA, NA)), 
+#               col.names = c("WellID", "sampleID", "Pheno", "SomSt")) %>% 
+#     
+#     write.csv(paste0(path, "P309152_107/P309152_107_exp_metadata.csv"), 
+#               row.names = FALSE)
+#
+# FACS date (FACS_d) was later added plate by plate like this:
+#read.csv(paste0(path, "P30915_101/P30915_101_exp_metadata.csv")) %>% 
+#     mutate(FACS_d = "2024-03-08") %>% 
+#     write.csv(paste0(path, "P30915_101/P30915_101_exp_metadata.csv"), 
+#               row.names = FALSE)
+
+```
+
+### Read mapping
+```{r}
+for (i in 1:length(plates)) {
+  plate_name <- paste0("plate", sprintf("%02d", i), "_SO")
+  file_name <- paste0(path, "01_Data/", plates[i], "/", 
+                      plates[i], ".readspercell.txt")
+  
+  # Read and process the reads per cell file
+  mapping_perc <- read.table(file_name, header = TRUE) %>%
+    group_by(RG) %>%
+    summarise(
+      total_reads = sum(N),
+      mapped_reads = sum(N[type != "Unmapped"], na.rm = TRUE),
+      exonic_reads = sum(N[type == "Exon"], na.rm = TRUE),
+      intron_reads = sum(N[type == "Intron"], na.rm = TRUE),
+      intgen_reads = sum(N[type == "Intergenic"], na.rm = TRUE),
+      mapped_perc = (mapped_reads / total_reads) * 100,
+      exonic_perc = (exonic_reads / mapped_reads) * 100,
+      intron_perc = (intron_reads / mapped_reads) * 100,
+      intgen_perc = (intgen_reads / mapped_reads) * 100,
+    ) %>%
+    as.data.frame()
+  # set rownames and remove unwanted columns
+  rownames(mapping_perc) <- mapping_perc$RG
+  mapping_perc[, c("RG", #"total_reads", 
+                   "mapped_reads", "exonic_reads", 
+                   "intron_reads", "intgen_reads")] <- NULL 
+  
+  # Retrieve Seurat object, add metadata, and assign it back
+  plate_so <- get(plate_name)
+  plate_so <- AddMetaData(plate_so, metadata = mapping_perc)
+  assign(plate_name, plate_so)
+}
+rm(i, plate_name, plate_so, file_name, mapping_perc)
+```
+
+
+## Merege seurat objects
+```{r}
+all.SO <- merge(plate01_SO, c(plate02_SO, plate03_SO, plate04_SO, 
+                              plate05_SO, plate06_SO, plate07_SO,
+                              plate08_SO, plate09_SO, plate10_SO,
+                              plate11_SO, plate12_SO, plate13_SO,
+                              plate14_SO, plate15_SO, plate16_SO,
+                              plate17_SO, plate18_SO, plate19_SO,
+                              plate20_SO, plate21_SO, plate22_SO,
+                              plate23_SO), 
+                add.cell.ids = c("P30915_101", "P30915_103", "P30915_105", 
+                                 "P30915_107", "P30915_109", "P30915_111",
+                                 "P32812_101", "P32812_103", "P32812_105", 
+                                 "P32812_107", "P32812_109", "P32812_111",
+                                 "P32812_113", "P32812_117", "P32812_119",
+                                 "P32812_121", "P32812_123", "P32812_125",
+                                 "P32812_127", "P32812_129", "P32812_131",
+                                 "P32812_133", "P32812_135"))
+# Remove known empty wells
+all.SO <- subset(all.SO, subset = sampleID != "none")
+
+# Join layers
+all.SO[["RNA"]] <- JoinLayers(all.SO[["RNA"]])
+
+#Remove spacious objects
+rm(plate01_SO, plate02_SO, plate03_SO, plate04_SO, plate05_SO, plate06_SO, 
+   plate07_SO, plate08_SO, plate09_SO, plate10_SO, plate11_SO, plate12_SO, 
+   plate13_SO, plate14_SO, plate15_SO, plate16_SO, plate17_SO, plate18_SO, 
+   plate19_SO, plate20_SO, plate21_SO, plate22_SO, plate23_SO); gc()
+
+# Inspect the object
+all.SO
+all.SO@meta.data %>% select(Pheno, SomSt) %>% table()
+```
+
+## Further add metadata
+### Simplified somite stage
+```{r}
+# Simlify SomSt
+SomSt_Simp <- rep(NA, nrow(all.SO@meta.data))
+for (i in 1:nrow(all.SO@meta.data)){
+  if (all.SO@meta.data[i, "SomSt"] == "14ss") {
+    SomSt_Simp[i] <- "14ss"
+  }
+  if (all.SO@meta.data[i, "SomSt"] == "15ss"){
+    SomSt_Simp[i] <- "14ss"
+  }
+  if (all.SO@meta.data[i, "SomSt"] == "20ss"){
+    SomSt_Simp[i] <- "21ss"
+  }
+  if (all.SO@meta.data[i, "SomSt"] == "21ss"){
+    SomSt_Simp[i] <- "21ss"
+  }
+  if (all.SO@meta.data[i, "SomSt"] == "28ss"){
+    SomSt_Simp[i] <- "28ss"
+  }
+  if (all.SO@meta.data[i, "SomSt"] == "29ss"){
+    SomSt_Simp[i] <- "28ss"
+  }
+}
+all.SO$SomSt_Simp <- SomSt_Simp
+rm(SomSt_Simp)
+
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+```
+
+### Calc additional QC meta data
+```{r}
+## %mitochondrial reads
+#Define list of mitochondrial genes
+mito_genes <- c("ND1", "CYTB", "ND6", "ND5", "ND4",  #This is all mitochondrial
+                "ND4L", "ND3", "COX3", "ATP6",       #genes in mitochondrial 
+                "ATP8", "COX2", "COX1", "ND2")       #reference genome 
+#NCBI: FJ460597.1
+all.SO <- PercentageFeatureSet(all.SO,
+                               features = mito_genes,
+                               col.name = "percent.mt")
+
+## %ribosomal reads
+#Define list of ribosomal genes
+ribo_genes <- rownames(all.SO)[grep("^RP[SL]", rownames(all.SO))]
+all.SO <- PercentageFeatureSet(all.SO,
+                               features = ribo_genes,
+                               col.name = "percent.rb")
+
+## list meta data variables
+names(all.SO@meta.data)
+
+```
+
+# Save data
+Save the compiled data and meta data in an RDS file to be read by the next script in
+the pipeline (02_QCFilter.Rmd)
+```{r}
+saveRDS(all.SO, paste0(path, 
+                       "03_AnalysisAllData/01_CompileData_output_", 
+                       Sys.Date(),
+                       ".Rds"))
+```
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+```
