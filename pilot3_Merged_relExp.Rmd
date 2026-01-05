@@ -1,0 +1,600 @@
+---
+title: "Untitled"
+author: "Robin Pranter"
+date: "2025-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+```{r}
+rm(list=ls());gc()
+
+options(future.globals.maxSize = 60000 * 1024^2)
+Sys.setenv(R_MAX_VSIZE = "60Gb")
+
+library(dplyr)
+library(Seurat)
+library(ggplot2)
+library(reshape2)
+library(ggridges)
+library(ggrastr)
+
+path <- paste0("C:/Users/pranter/Desktop/Transfer20251124/PhD_RobinPranter/", 
+               "01_Projects/04_NCCEnrichmentMethod/")
+```
+
+# Read Soldatov data
+```{r}
+#Read count tables
+Sol_1 <- read.table(paste0(path, "05_10XData/SoldatovData/",
+                     "E10.5_post-otic_Sox10_counts.txt"), sep = " ")
+Sol_1$gene <- rownames(Sol_1)
+Sol_2 <- read.table(paste0(path, "05_10XData/SoldatovData/",
+                            "E10.5_tail_Wnt1_counts.txt"), sep = " ")
+Sol_2$gene <- rownames(Sol_2)
+Sol_3 <- read.table(paste0(path, "05_10XData/SoldatovData/",
+                            "E10.5_trunk_Wnt1_counts.txt"), sep = " ")
+Sol_3$gene <- rownames(Sol_3)
+Sol_4 <- read.table(paste0(path, "05_10XData/SoldatovData/", 
+                            "E8.5_whole_embryo_Wnt1_counts.txt"), sep = " ")
+Sol_4$gene <- rownames(Sol_4)
+Sol_5 <- read.table(paste0(path, "05_10XData/SoldatovData/",
+                            "E9.5_anterior_Sox10_counts.txt"), sep = " ")
+Sol_5$gene <- rownames(Sol_5)
+Sol_6 <- read.table(paste0(path, "05_10XData/SoldatovData/",
+                            "E9.5_posterior_Sox10_counts.txt"), sep = " ")
+Sol_6$gene <- rownames(Sol_6)
+Sol_7 <- read.table(paste0(path, "05_10XData/SoldatovData/",
+                            "E9.5_trunk_Wnt1_counts.txt"), sep = " ")
+Sol_7$gene <- rownames(Sol_7)
+
+#Merge tables into one
+Sol <- merge(Sol_1, Sol_2, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_3, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_4, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_5, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_6, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_7, by = "gene", all.x = TRUE, all.y = TRUE)
+#Remove old tables
+rm(Sol_1, Sol_2, Sol_3, Sol_4, Sol_5, Sol_6, Sol_7); gc()
+
+#Make nice
+Sol[,-1] <- lapply(Sol[,-1], as.numeric)
+Sol <- Sol[order(colnames(Sol))]
+
+#Use gene names for rownames and remove gene column
+rownames(Sol) <- Sol$gene
+Sol <- dplyr::select(Sol, -c("gene"))
+gc()
+```
+
+```{r}
+# Extract the row and convert to long format
+rel_exp.df <- data.frame(Sox10_PM = as.numeric(Sol["Sox10", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Sox9_PM = as.numeric(Sol["Sox9", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Snai1_PM = as.numeric(Sol["Snai1", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Snai2_PM = as.numeric(Sol["Snai2", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         #FoxD3_PM = as.numeric(Sol["FoxD3", ]/
+                         #                         (colSums(Sol, na.rm = TRUE)/
+                         #                             1e+06)),
+                         Tfap2a_PM = as.numeric(Sol["Tfap2a", ]/
+                                                   (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                            Dataset = "Soldatov",
+                            Sorted = "Sox10")
+rel_exp.df[is.na(rel_exp.df)] <- 0 # Some genes are not present in the count 
+#rm(Sol); gc()                     # table, introducing NAs. These are converted
+                                   # to 0s here
+```
+
+# Read Cao data
+```{r}
+#Read data
+rel_exp.df <- readRDS(paste0(path, 
+                      "05_10XData/CaoData/gene_count_cleaned.RDS")) %>%
+  CreateSeuratObject(project = "Cao2019") %>%
+  FetchData(vars = c("ENSMUSG00000033006.9",  #Sox10
+                     "ENSMUSG00000000567.5",  #Sox9
+                     "ENSMUSG00000042821.7",  #Snai1
+                     "ENSMUSG00000022676.6",  #Snai2
+                     #"ENSMUSG00000067261.4",  #FoxD3
+                     "ENSMUSG00000021359.15", #Tfap2a
+                     "nCount_RNA"), layer = "counts") %>%
+  mutate(Sox10_PM  = ENSMUSG00000033006.9  / (nCount_RNA / 1e+06),
+         Sox9_PM   = ENSMUSG00000000567.5  / (nCount_RNA / 1e+06),
+         Snai1_PM  = ENSMUSG00000042821.7  / (nCount_RNA / 1e+06),
+         Snai2_PM  = ENSMUSG00000022676.6  / (nCount_RNA / 1e+06),
+         #FoxD3_PM  = ENSMUSG00000067261.4  / (nCount_RNA / 1e+06),
+         Tfap2a_PM = ENSMUSG00000021359.15 / (nCount_RNA / 1e+06),
+         Dataset = "Cao",
+         Sorted = "Whole embryo") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           #"FoxD3_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+gc()
+```
+
+# Read 10X data
+```{r}
+rel_exp.df <- readRDS(paste0(path, 
+                      "06_10XAnalysis/pilot3_Merged_output_2025-12-15.Rds")) %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1", 
+                     "SNAI2",
+                     #"FOXD3",
+                     "TFAP2A",
+                     "nCount_RNA", 
+                     "orig.ident"), layer = "counts") %>%
+  subset(orig.ident == "Pmur_82") %>%
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e+06),
+         Sox9_PM  = SOX9 / (nCount_RNA / 1e+06),
+         Snai1_PM = SNAI1 / (nCount_RNA / 1e+06),
+         Snai2_PM = SNAI2 / (nCount_RNA / 1e+06),
+         #FoxD3_PM = rna_FOXD3 / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Leniently sorted",
+         Sorted = "HNK-1 top 15%") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           #"FoxD3_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+
+rel_exp.df <- readRDS(paste0(path, 
+                      "06_10XAnalysis/pilot3_Merged_output_2025-12-15.Rds")) %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1", 
+                     "SNAI2",
+                     #"FOXD3", 
+                     "TFAP2A",
+                     "nCount_RNA", 
+                     "orig.ident"), layer = "counts") %>%
+  subset(orig.ident == "Pmur_84") %>% 
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e+06),
+         Sox9_PM  = SOX9 / (nCount_RNA / 1e+06),
+         Snai1_PM = SNAI1 / (nCount_RNA / 1e+06),
+         Snai2_PM = SNAI2 / (nCount_RNA / 1e+06),
+         #FoxD3_PM = rna_FOXD3 / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Unsorted",
+         Sorted = "Whole embryo") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           #"FoxD3_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+
+rel_exp.df <- readRDS(paste0(path, 
+                      "06_10XAnalysis/pilot3_Merged_output_2025-12-15.Rds")) %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1",
+                     "SNAI2",
+                     #"FOXD3", 
+                     "TFAP2A",
+                     "nCount_RNA", 
+                     "orig.ident"), layer = "counts") %>%
+  subset(orig.ident == "Pmur_85") %>% 
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e+06),
+         Sox9_PM  = SOX9 / (nCount_RNA / 1e+06),
+         Snai1_PM = SNAI1 / (nCount_RNA / 1e+06),
+         Snai2_PM = SNAI2 / (nCount_RNA / 1e+06),
+         #FoxD3_PM = rna_FOXD3 / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Unsorted",
+         Sorted = "Whole embryo") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           #"FoxD3_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+```
+Obs that the FoxD3 data is from normalized data and not counts. Be careful with
+the interpretation.
+
+# Read smart-seq data
+```{r}
+rel_exp.df <- readRDS("C:/Users/pranter/Desktop/Transfer20251124/PhD_RobinPranter/01_Projects/01_NCCAtlas/02_Drylab/02_Analysis/01_1st6samps_QC_general_output_2025-02-24.Rds") %>%
+  subset(orig.ident == "Plate_5") %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1",
+                     "SNAI2",
+                     #"FOXD3", 
+                     "TFAP2A",
+                     "nCount_RNA"), layer = "counts") %>%
+  mutate(Sox10_PM  = SOX10  / (nCount_RNA / 1e+06),
+         Sox9_PM   = SOX9   / (nCount_RNA / 1e+06),
+         Snai1_PM  = SNAI1  / (nCount_RNA / 1e+06),
+         Snai2_PM  = SNAI2  / (nCount_RNA / 1e+06),
+         #FoxD3_PM  = FOXD3  / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Strictly sorted",
+         Sorted = "HNK-1 top 5%") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           #"FoxD3_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+
+rel_exp.df <- readRDS("C:/Users/pranter/Desktop/Transfer20251124/PhD_RobinPranter/01_Projects/01_NCCAtlas/02_Drylab/02_Analysis/01_1st6samps_QC_general_output_2025-02-24.Rds") %>%
+  subset(orig.ident == "Plate_6") %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1",
+                     "SNAI2",
+                     #"FOXD3", 
+                     "TFAP2A",
+                     "nCount_RNA"), layer = "counts") %>%
+  mutate(Sox10_PM  = SOX10  / (nCount_RNA / 1e+06),
+         Sox9_PM   = SOX9   / (nCount_RNA / 1e+06),
+         Snai1_PM  = SNAI1  / (nCount_RNA / 1e+06),
+         Snai2_PM  = SNAI2  / (nCount_RNA / 1e+06),
+         #FoxD3_PM  = FOXD3  / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Strictly sorted",
+         Sorted = "HNK-1 top 5%") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           #"FoxD3_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+gc()
+```
+
+# Plot all data
+## Calc summaries for plotting
+```{r}
+#"PAX3", "PAX7", "FOXD3", "SOX10", "SOX9", 
+#"WNT1", "TFAP2A", "SOX5", "SNAI2", "ZIC1"
+
+#Compute the some summaries to be used for plotting
+summary_stats <- rel_exp.df %>%
+  group_by(Dataset, Sorted) %>%
+  summarize(#Sample size
+            n = n(),
+            n_char = paste0("n = ", n()),
+            #Sox10
+            n_none0_Sox10 = sum(Sox10_PM > 0, na.rm =TRUE),
+            perc_non0_Sox10 = (sum(Sox10_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Sox10_char = paste0("% non-zero cells = ", 
+                                       (sum(Sox10_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #Sox9
+            n_none0_Sox9 = sum(Sox9_PM > 0, na.rm =TRUE),
+            perc_non0_Sox9 = (sum(Sox9_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Sox9_char = paste0("% non-zero cells = ", 
+                                       (sum(Sox9_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #Snai1
+            n_none0_Snai1 = sum(Snai1_PM > 0, na.rm =TRUE),
+            perc_non0_Snai1 = (sum(Snai1_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Snai1_char = paste0("% non-zero cells = ", 
+                                       (sum(Snai1_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #Snai2
+            n_none0_Snai2 = sum(Snai2_PM > 0, na.rm =TRUE),
+            perc_non0_Snai2 = (sum(Snai2_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Snai2_char = paste0("% non-zero cells = ", 
+                                       (sum(Snai2_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            ##FoxD3
+            #n_none0_FoxD3 = sum(FoxD3_PM > 0, na.rm =TRUE),
+            #perc_non0_FoxD3 = (sum(FoxD3_PM > 0, na.rm =TRUE)/n())*100,
+            #perc_non0_FoxD3_char = paste0("% non-zero cells = ", 
+            #                           (sum(FoxD3_PM > 0, na.rm =TRUE)/n()) %>%
+            #                             round(3)*100),
+            
+            #TFAP2A
+            n_none0_Tfap2a = sum(Tfap2a_PM > 0, na.rm =TRUE),
+            perc_non0_Tfap2a = (sum(Tfap2a_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Tfap2a_char = paste0("% non-zero cells = ", 
+                                       (sum(Tfap2a_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100)
+            )
+
+# Reorder the Dataset factor levels based on perc_non0_Sox10
+rel_exp.df$Dataset <- factor(rel_exp.df$Dataset, 
+                levels = summary_stats$Dataset[order(summary_stats$perc_non0_Sox10)])
+```
+
+## Sox10
+```{r}
+P1 <- ggplot(rel_exp.df, aes(y = Dataset, x = Sox10_PM, 
+                             fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                    jittered_points = TRUE,
+                                    position = position_raincloud(ygap = .02, 
+                                                                  height = .2),
+                                    point_shape = 21,
+                                    point_alpha = .2,
+                                    point_size = 1,
+                                    alpha = .7,
+                                    rel_min_height = 0.001,
+                                    scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 12050)) +
+  # Set colors
+  scale_fill_manual(values = c("HNK-1 top 5%"  = "#64EC09",
+                               "Sox10"         = "#00bfc4b2",
+                               "HNK-1 top 15%" = "#53AC90",
+                               "Whole embryo"  = "#BDBDBD")) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_Sox10_char),
+            vjust = -3.5, size = 8*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 6000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 8*.35) + # *.35 translates pt to mm
+  
+  #Adjust theme 
+  theme(#plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        #Axes
+        axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 8),
+        axis.title.y = element_text(size = 11),
+        axis.title.x = element_text(size = 11, vjust = 0),
+        axis.text.y = element_text(angle = 45),
+        axis.ticks.y = element_blank(),
+        #Legend
+        legend.text  = element_text(size = 8),
+        legend.title = element_text(size = 11),
+        legend.key.size = unit(3, "mm"),
+        legend.position = "none",
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_line(color = "gray"),
+        panel.grid.minor = element_line(color = "gray"),
+        panel.border = element_rect(colour = "black", fill = NA)) +
+  labs(x = "Sox10 counts per 1M total counts",
+       y = "Frequency of cells")
+P1
+
+ggsave(paste0(path, "07_10XResults/relExpSox10.svg"),
+       P1, 
+       #height = 167.625,
+       height = 160, width = 89, units = "mm")
+```
+
+## Sox9
+```{r}
+P2 <- ggplot(rel_exp.df, aes(y = Dataset, x = Sox9_PM, fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                          jittered_points = TRUE,
+                                          position = position_raincloud(ygap = .02, 
+                                                                        height = .2),
+                                          point_shape = 21,
+                                          point_alpha = .2,
+                                          point_size = .7,
+                                          alpha = .7,
+                                          rel_min_height = 0.001,
+                                          scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 18200)) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_Sox9_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 10000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  
+  #Adjust axes and legend 
+  theme(axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 5),
+        axis.title = element_text(size = 8),
+        axis.text.y = element_text(angle = 0),
+        axis.ticks.y = element_blank(),
+        legend.text  = element_text(size = 5),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "bottom") +
+  labs(x = "Relative Sox9 expression",
+       y = element_blank())
+P2
+```
+
+## Snai1
+```{r}
+P3 <- ggplot(rel_exp.df, aes(y = Dataset, x = Snai1_PM, fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                          jittered_points = TRUE,
+                                          position = position_raincloud(ygap = .02, 
+                                                                        height = .2),
+                                          point_shape = 21,
+                                          point_alpha = .2,
+                                          point_size = .7,
+                                          alpha = .7,
+                                          rel_min_height = 0.001,
+                                          scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 5000)) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_Snai1_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 4000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  
+  #Adjust axes and legend 
+  theme(axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 5),
+        axis.title = element_text(size = 8),
+        axis.text.y = element_text(angle = 0),
+        axis.ticks.y = element_blank(),
+        legend.text  = element_text(size = 5),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "bottom") +
+  labs(x = "Relative Snai1 expression",
+       y = element_blank())
+P3
+```
+
+## Snai2
+```{r}
+P4 <- ggplot(rel_exp.df, aes(y = Dataset, x = Snai2_PM, fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                          jittered_points = TRUE,
+                                          position = position_raincloud(ygap = .02, 
+                                                                        height = .2),
+                                          point_shape = 21,
+                                          point_alpha = .2,
+                                          point_size = .7,
+                                          alpha = .7,
+                                          rel_min_height = 0.001,
+                                          scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 5000)) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_Snai2_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 4000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  
+  #Adjust axes and legend 
+  theme(axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 5),
+        axis.title = element_text(size = 8),
+        axis.text.y = element_text(angle = 0),
+        axis.ticks.y = element_blank(),
+        legend.text  = element_text(size = 5),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "bottom") +
+  labs(x = "Relative Snai2 expression",
+       y = element_blank())
+P4
+```
+
+## FoxD3
+```{r}
+P5 <- ggplot(rel_exp.df, aes(y = Dataset, x = FoxD3_PM, fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                          jittered_points = TRUE,
+                                          position = position_raincloud(ygap = .02, 
+                                                                        height = .2),
+                                          point_shape = 21,
+                                          point_alpha = .2,
+                                          point_size = .7,
+                                          alpha = .7,
+                                          rel_min_height = 0.001,
+                                          scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 5000)) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_FoxD3_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 4000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 5*.35) + # *.35 translates pt to mm
+  
+  #Adjust axes and legend 
+  theme(axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 5),
+        axis.title = element_text(size = 8),
+        axis.text.y = element_text(angle = 0),
+        axis.ticks.y = element_blank(),
+        legend.text  = element_text(size = 5),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "bottom") +
+  labs(x = "Relative FoxD3 expression",
+       y = element_blank())
+P5
+```
+
+## Tfap2a
+```{r}
+P6 <- ggplot(rel_exp.df, aes(y = Dataset, x = Tfap2a_PM, fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                          jittered_points = TRUE,
+                                          position = position_raincloud(ygap = .02, 
+                                                                        height = .2),
+                                          point_shape = 21,
+                                          point_alpha = .2,
+                                          point_size = .7,
+                                          alpha = .7,
+                                          rel_min_height = 0.001,
+                                          scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 12050)) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_Tfap2a_char),
+            vjust = -3.5, size = 7*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 6000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 7*.35) + # *.35 translates pt to mm
+  
+  #Adjust theme 
+  theme(#plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        #Axes
+        axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 5),
+        axis.title.y = element_text(size = 8),
+        axis.title.x = element_text(size = 8, vjust = 0),
+        axis.text.y = element_text(angle = 45),
+        axis.ticks.y = element_blank(),
+        #Legend
+        legend.text  = element_text(size = 5),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "none",
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_line(color = "gray"),
+        panel.grid.minor = element_line(color = "gray"),
+        panel.border = element_rect(colour = "black", fill = NA)) +
+  labs(x = "Tfap2a counts per 1M total counts",
+       y = "Frequency of cells")
+P6
+```
+
+```{r}
+genes <- c("Sox10_PM", "Sox9_PM", "Snai1_PM", 
+           "Snai2_PM", #"FoxD3_PM", 
+           "Tfap2a_PM")
+
+# Subset the matrix
+mat <-  subset(rel_exp.df, Dataset == "Unsorted")[, genes]
+
+# Logical matrix of >0 expression
+bin <- mat > 0
+
+# Empty matrix for output
+coexpr <- matrix(0, nrow = length(genes), ncol = length(genes),
+                 dimnames = list(genes, genes))
+
+# Fill with counts
+for (g1 in genes) {
+  for (g2 in genes) {
+    coexpr[g1, g2] <- sum(bin[, g1] & bin[, g2])
+  }
+}
+
+coexpr
+```
+

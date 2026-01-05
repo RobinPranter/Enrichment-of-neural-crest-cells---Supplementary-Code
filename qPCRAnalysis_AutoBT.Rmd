@@ -1,0 +1,701 @@
+---
+title: "qPCR of NCC-markers with increasing HNK1 labelling"
+author: "Robin Pranter"
+date: "2024-01-23"
+output:
+  pdf_document:
+    latex_engine: xelatex
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up environment
+
+```{r}
+rm(list = ls())
+
+#Load packages
+suppressMessages(library("tidyverse"))
+library("emmeans")
+library("latex2exp")
+
+#Set working directory
+setwd("C:/Users/robin/OneDrive - Lund University/PhD_RobinPranter/01_Projects/01_NCCAtlas/01_Wetlab/qPCR_240122")
+
+#Read and setup data from the two qPCR-plates
+Pool5 <- read.csv("RealTimeData_Pool5/20240122_162754_CT029692_20220214_Pool5_AutoBT49.4.csv")
+#Uses Cq values from an automatically generated single baseline threshold (49.4)
+MetaData_Pool5 <- Pool5[1:18, 1:2]
+colnames(Pool5) <- Pool5[19,]
+Pool5$Somites[20:nrow(Pool5)] <- "23ss"
+Pool5$Well[20:nrow(Pool5)] <- paste("Plate1_", Pool5$Well[20:nrow(Pool5)], sep = "")
+
+Pool6 <- read.csv("RealTimeData_Pool6/20240123_124655_CT029692_20220214_Pool6_AutoBT81.95.csv")
+#Uses Cq values from an automatically generated single baseline threshold (81.95)
+MetaData_Pool6 <- Pool6[1:18, 1:2]
+colnames(Pool6) <- Pool6[19,]
+Pool6$Somites[20:nrow(Pool6)] <- "26ss"
+Pool6$Well[20:nrow(Pool6)] <- paste("Plate2_", Pool6$Well[20:nrow(Pool6)], sep = "")
+
+#merge the two plates into one data frame
+Data <- rbind(Pool5[20:nrow(Pool5),], 
+              Pool6[20:nrow(Pool6),]) %>% subset(Fluor == "SYBR")
+Data <- separate_wider_delim(Data, cols = Sample, delim = "_", 
+                             names = c("Pool", "Sort"), cols_remove = FALSE)
+rownames(Data)<-1:nrow(Data)
+Data$Well <- as.factor(Data$Well)
+Data$Fluor <- as.factor(Data$Fluor)
+Data$Target <- as.factor(Data$Target)
+Data$Content <- as.factor(Data$Content)
+Data$Pool <- as.factor(Data$Pool)
+Data$Sort <- as.factor(Data$Sort)
+Data$Sample <- as.factor(Data$Sample)
+Data$Somites <- as.factor(Data$Somites)
+Data$Cq <- as.numeric(Data$Cq)
+Data$Sample <- factor(Data$Sample, levels = c("Pool5_NTC", "Pool5_Neg", "Pool5_10%", 
+                                              "Pool5_5%", "Pool5_2.5%", "Pool6_NTC", 
+                                              "Pool6_Neg", "Pool6_10%", "Pool6_5%", 
+                                              "Pool6_2.5%"))
+Data$Sort <- factor(Data$Sort, levels = c("NTC", "Neg", "10%", "5%", "2.5%"))
+
+#Have a look at the data
+str(Data)
+```
+# Quality control and filtering
+
+## Filter based on melt curves (data not shown)
+```{r}
+BadMeltCurves <- c(#Pool5 Sox10
+                   "Plate1_A02",
+                   
+                   #Pool5 Snai2
+                   "Plate1_A07", "Plate1_A08", "Plate1_B09", "Plate1_C07", 
+                   "Plate1_C09", "Plate1_D09", 
+                   
+                   #Pool6 Sox10
+                   "Plate2_A01", "Plate2_A02", "Plate2_B02",
+                   
+                   #Pool6 Snai2
+                   "Plate2_C07"
+                   )
+Data_prefilt <- Data
+for (i in BadMeltCurves){
+  Data <- subset(Data, Well != i)
+}
+rm(i, BadMeltCurves)
+```
+(This is a rather harsh filter.)
+
+## Check no template controls
+```{r}
+ggplot(Data, aes(Cq, Target)) +
+  geom_point(size=2, aes(colour=Content), alpha = 0.7) +
+  xlim(0,60) +
+  facet_grid(cols=vars(Pool))
+```
+Snai2 + pool5 and 6 as well as Sox10 + Pool6 looks a bit iffy. However, the 
+amplification curves (data not shown) look very different (not exponential growth) 
+from the samples so it is not a problem.
+
+```{r}
+NTCs <- subset(Data, Content == "NTC")
+Data <- subset(Data, Content != "NTC")
+```
+
+## Filter based on Std Dev of technical replicates
+
+Plot means vs standard deviations
+```{r}
+Data_summary <- Data %>% 
+  group_by(Target, Sample) %>% 
+  na.omit() %>% 
+  summarise(Cq_mean = mean(Cq), Cq_sd = sd(Cq)) 
+
+plot(Data_summary$Cq_mean, 
+     Data_summary$Cq_sd, main="Before filter", 
+     xlab = "Cq mean", ylab = "Cq sd")
+```
+Looks very good. No need to do any filtering based on standard deviations. 
+
+# Analysis
+## Calculate normalized expression
+
+Normalized target gene Cq is calculates as: $a = 2^{(b−c)}$ \
+Where \
+a=normalized target gene Cq \
+b=GAPDH Cq \
+c=target gene Cq \
+
+```{r}
+CalcRelExp <- function(Target_data, GAPDH_data){
+  #Define function for calculation
+  RelExp <- function(b, c){
+  a <- 2^(b-c)
+  return(a)
+  }
+  
+  #Loop over Target_data
+  A <-c()
+  for (i in 1:nrow(Target_data)){
+    B_name <- Target_data$Sample[i]
+    B <- subset(GAPDH_data, Sample == B_name)$Cq_mean
+    C <- Target_data$Cq[i]
+    A <- append(A, RelExp(B, C))
+  }
+  
+  #Add the calculated relative expression to the data frame
+  Cq_rel <- A
+  Target_data <- cbind(Target_data, Cq_rel)
+  return(Target_data)
+}
+
+GAPDH <- subset(Data_summary, Target == "GAPDH")
+Data <- CalcRelExp(Data, GAPDH)
+rm(GAPDH)
+```
+
+## Recalculate Data_summary using the relative Cq values
+
+```{r}
+Data_summary <- Data %>% 
+  group_by(Target, Sample) %>% 
+  na.omit() %>% 
+  summarise(Cq_mean = mean(Cq), 
+            Cq_sd = sd(Cq), 
+            Cq_rel_mean = mean(Cq_rel), 
+            Cq_rel_sd = sd(Cq_rel), n = length(Sample))
+
+plot(subset(Data_summary, Target != "GAPDH")$Cq_rel_mean, 
+     subset(Data_summary, Target != "GAPDH")$Cq_rel_sd, 
+     main="Realtive Cq's (excluding GAPDH)", 
+     xlab = "Cq rel mean", ylab = "Cq rel sd")
+```
+
+## Normalize exp relative to the Neg-Sort
+```{r}
+# Calculate mean of the normalized Cq within a Pool and gene
+Data <- Data %>% 
+  group_by(Pool, Sort, Target) %>% 
+  mutate(Cq_rel_mean = mean(Cq_rel)) %>% # OBS that Cq_rel is exp nerm by GAPDH
+  ungroup()
+
+# Extract Neg means per Target and Pool
+neg_means <- Data %>%
+  filter(Sort == "Neg") %>%
+  select(Target, Pool, neg_mean = Cq_rel_mean) %>%
+  distinct()
+
+# Join back using Target and Pool
+Data <- Data %>%
+  left_join(neg_means, by = c("Target", "Pool")) %>%
+  #Calc normalization relative to the mean of the expression in the Neg-gate
+  mutate(Cq_rel_NegNorm = Cq_rel / neg_mean,
+         Cq_rel_NegDiff = Cq_rel - neg_mean)
+```
+
+
+## Plot and test differences between the sorting gates
+
+```{r}
+plot_FoxD3 <- subset(Data, Target == "FoxD3") %>%
+  ggplot() +
+  aes(Pool, Cq_rel, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "FoxD3") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{FoxD3}}$'))
+plot_FoxD3
+```
+
+```{r}
+plot_FoxD3_NegNorm <- subset(Data, Target == "FoxD3") %>%
+  ggplot() +
+  aes(Pool, Cq_rel_NegNorm, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  geom_hline(yintercept = 1) +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, angle = 45),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "FoxD3") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{FoxD3}}$'))
+plot_FoxD3_NegNorm
+```
+
+```{r}
+plot_FoxD3_NegDiff <- subset(Data, Target == "FoxD3") %>%
+  ggplot() +
+  aes(Pool, Cq_rel_NegDiff, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, angle = 45),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "FoxD3") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{FoxD3}}$'))
+plot_FoxD3_NegDiff
+```
+
+```{r}
+lm(data = subset(Data, Target=="FoxD3"), Cq_rel ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+#lm(data = subset(Data, Target=="FoxD3" & Pool == "Pool5"), Cq_rel ~ Sort) %>% 
+#  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+#  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+#                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+#                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+#lm(data = subset(Data, Target=="FoxD3" & Pool == "Pool6"), Cq_rel ~ Sort) %>% 
+#  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+#  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+#                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+#                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+
+```{r}
+plot_Snai2 <- subset(Data, Target == "Snai2") %>%
+  ggplot() +
+  aes(Pool, Cq_rel, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "Snai2") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{Snai2}}$'))
+plot_Snai2
+```
+
+```{r}
+plot_Snai2_NegNorm <- subset(Data, Target == "Snai2") %>%
+  ggplot() +
+  aes(Pool, Cq_rel_NegNorm, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  geom_hline(yintercept = 1) +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, angle = 45),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "Snai2") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{Snai2}}$'))
+plot_Snai2_NegNorm
+```
+
+```{r}
+plot_Snai2_NegDiff <- subset(Data, Target == "Snai2") %>%
+  ggplot() +
+  aes(Pool, Cq_rel_NegDiff, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, angle = 45),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "Snai2") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{Snai2}}$'))
+plot_Snai2_NegDiff
+```
+
+```{r}
+#Since there are only 2 levels of Pool I include it as a fixed factor 
+lm(data = subset(Data, Target=="Snai2"), Cq_rel ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+#lm(data = subset(Data, Target=="Snai2" & Pool == "Pool5"), Cq_rel ~ Sort) %>% 
+#  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+#  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+#                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+#                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+#lm(data = subset(Data, Target=="Snai2" & Pool == "Pool6"), Cq_rel ~ Sort) %>% 
+#  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+#  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+#                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+#                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+
+```{r}
+plot_Sox10 <- subset(Data, Target == "Sox10") %>%
+  ggplot() +
+  aes(Pool, Cq_rel, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "Sox10") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{Sox10}}$'))
+plot_Sox10
+```
+
+```{r}
+plot_Sox10_NegNorm <- subset(Data, Target == "Sox10") %>%
+  ggplot() +
+  aes(Pool, Cq_rel_NegNorm, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  geom_hline(yintercept = 1) +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, angle = 45),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "Sox10") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{Sox10}}$'))
+plot_Sox10_NegNorm
+```
+
+```{r}
+plot_Sox10_NegDiff <- subset(Data, Target == "Sox10") %>%
+  ggplot() +
+  aes(Pool, Cq_rel_NegDiff, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols = vars(Sort), switch = "x") +
+  theme_classic(base_size = 8) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size = 5, angle = 45),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.title = element_text(size = 8),   
+        axis.title.y = element_text(size = 8),   
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside") + 
+  labs(title = "Sox10") +
+  ylab(label = TeX('$2^{Cq_{GAPDH} - Cq_{Sox10}}$'))
+plot_Sox10_NegDiff
+```
+
+```{r}
+lm(data = subset(Data, Target=="Sox10"), Cq_rel ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+#lm(data = subset(Data, Target=="Sox10" & Pool == "Pool5"), Cq_rel ~ Sort) %>% 
+#  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+#  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+#                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+#                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+#lm(data = subset(Data, Target=="Sox10" & Pool == "Pool6"), Cq_rel ~ Sort) %>% 
+#  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+#  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+#                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+#                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+Why is Pool5 always lower than Pool6 in the plots? This is not to be expected. 
+But seems to be true:
+```{r}
+targs_P5 <- mean(subset(Data, Pool == "Pool5" & Target != "GAPDH")$Cq)
+GAPDH_P5 <- mean(subset(Data, Pool == "Pool5" & Target == "GAPDH")$Cq)
+CqRel_P5 <- 2^(GAPDH_P5 - targs_P5)
+CqRel_P5
+
+targs_P6 <- mean(subset(Data, Pool == "Pool6" & Target != "GAPDH")$Cq)
+GAPDH_P6 <- mean(subset(Data, Pool == "Pool6" & Target == "GAPDH")$Cq)
+CqRel_P6 <- 2^(GAPDH_P6 - targs_P6)
+CqRel_P6
+```
+(Not so strange considering that Pool5 is from a smaller embryo)
+
+
+# Conclusions:
+FoxD3 and Sox10 both tell a very clear story where expression gradually increases 
+from the HNK1-negative cells to the top 2.5% HNK1-expressing cells. They both seem to 
+have an elbow point between the two top HNK1-expressing bins. This is especially 
+clear in Pool6 but also evident in Pool5 is we review the estimates from the models.
+
+Snai2 tell a less clear story. It also seas an increase in expression with 
+increased HNK1-expression. However, the elbow point seem to be between HNK1-negative 
+cells and all the other bins.
+
+# Save plots
+```{r}
+savepath <- "C:/Users/robin/OneDrive - Lund University/PhD_RobinPranter/01_Projects/04_NCCEnrichmentMethod/04_qPCRResults/"
+
+ggsave(filename = paste0(savepath, "qPCRPlot_Panel2_FoxD3.svg"),
+      plot = plot_FoxD3_NegNorm, height = 56.750, width = 83.41668, units = "mm")
+ggsave(filename = paste0(savepath, "qPCRPlot_Panel3_Snai2.svg"),
+      plot = plot_Snai2_NegNorm, height = 56.750, width = 83.41668, units = "mm")
+ggsave(filename = paste0(savepath, "qPCRPlot_Panel4_Sox10.svg"),
+      plot = plot_Sox10_NegNorm, height = 56.750, width = 83.41668, units = "mm")
+```
+
+
+# Extra: analysis without normalization
+```{r}
+plot_FoxD3_NonNorm <- subset(Data, Target == "FoxD3") %>%
+  ggplot() +
+  aes(Pool, Cq, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols=vars(Sort), switch = "x") +
+  theme_classic(base_size = 20) +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.margin = margin(1,1,1,1, "cm")) +
+  labs(title = "FoxD3") +
+  ylab(label = TeX('$Cq_{FoxD3}$')) + 
+  coord_cartesian(ylim = c(20, 40))
+plot_FoxD3_NonNorm
+```
+
+```{r}
+lm(data = subset(Data, Target=="FoxD3"), Cq ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="FoxD3" & Pool == "Pool5"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="FoxD3" & Pool == "Pool6"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+
+```{r}
+plot_Snai2_NonNorm <- subset(Data, Target == "Snai2") %>%
+  ggplot() +
+  aes(Pool, Cq, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols=vars(Sort), switch = "x") +
+  theme_classic(base_size = 20) +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.margin = margin(1,1,1,1, "cm")) +
+  labs(title = "Snai2") +
+  ylab(label = TeX('$Cq_{Snai2}$')) + 
+  coord_cartesian(ylim = c(20, 40))
+plot_Snai2_NonNorm
+```
+
+```{r}
+#Since there are only 2 levels of Pool I include it as a fixed factor 
+lm(data = subset(Data, Target=="Snai2"), Cq ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="Snai2" & Pool == "Pool5"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="Snai2" & Pool == "Pool6"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+
+```{r}
+plot_Sox10_NonNorm <- subset(Data, Target == "Sox10") %>%
+  ggplot() +
+  aes(Pool, Cq, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols=vars(Sort), switch = "x") +
+  theme_classic(base_size = 20) +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.margin = margin(1,1,1,1, "cm")) +
+  labs(title = "Sox10") +
+  ylab(label = TeX('$Cq_{Sox10}$')) + 
+  coord_cartesian(ylim = c(20, 40))
+plot_Sox10_NonNorm
+```
+
+
+```{r}
+lm(data = subset(Data, Target=="Sox10"), Cq ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="Sox10" & Pool == "Pool5"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="Sox10" & Pool == "Pool6"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+```{r}
+plot_GAPDH_NonNorm <- subset(Data, Target == "GAPDH") %>%
+  ggplot() +
+  aes(Pool, Cq, fill = Pool) +
+  geom_bar(stat = "summary", fun = "mean", width = 1) +
+  geom_jitter() +
+  facet_grid(cols=vars(Sort), switch = "x") +
+  theme_classic(base_size = 20) +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.line.x.bottom = element_line(),
+        strip.background = element_rect(linetype = "blank"),
+        plot.margin = margin(1,1,1,1, "cm")) +
+  labs(title = "GAPDH") +
+  ylab(label = TeX('$Cq_{GAPDH}$')) + 
+  coord_cartesian(ylim = c(20, 40))
+plot_GAPDH_NonNorm
+```
+
+
+```{r}
+lm(data = subset(Data, Target=="GAPDH"), Cq ~ Sort + Pool) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="GAPDH" & Pool == "Pool5"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+
+lm(data = subset(Data, Target=="GAPDH" & Pool == "Pool6"), Cq ~ Sort) %>% 
+  emmeans(specs = ~ Sort, adjust = "tukey") %>%
+  contrast(method = list("Neg -  10%" = c(1, 0, 0, 0)-c(0, 1, 0, 0),
+                         "10% -   5%" = c(0, 1, 0, 0)-c(0, 0, 1, 0),
+                         " 5% - 2.5%" = c(0, 0, 1, 0)-c(0, 0, 0, 1)))
+```
+
+
+```{r}
+#GAPDH
+mean(abs(c(-1.153, 0.499, 0.968)))
+
+#FoxD3
+mean(abs(c(-0.406, -0.224, 1.03)))
+
+#Snai2
+mean(abs(c(0.33, 1.36, 2.00)))
+
+#Sox10
+mean(abs(c(2.42, 1.29, 2.24)))
+
+#numbers are from the "estimate" column from the model outputs
+```
+

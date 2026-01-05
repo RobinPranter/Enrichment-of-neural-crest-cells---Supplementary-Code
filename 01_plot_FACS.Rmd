@@ -1,0 +1,1017 @@
+---
+title: "plot_FACS.Rmd"
+author: "Robin Pranter"
+date: "2024-11-04"
+output: pdf_document
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The purpose of this script is to produce plots of flow cytometry data for the methods
+paper.
+
+#Setup
+```{r}
+options(future.globals.maxSize = 60000 * 1024^2)
+Sys.setenv(R_MAX_VSIZE = "60Gb")
+
+rm(list=ls()); gc()
+
+getwd()
+
+path <- paste0("C:/Users/pranter/Desktop/Transfer20251124/PhD_RobinPranter/", 
+               "01_Projects/04_NCCEnrichmentMethod/01_FlowCytData/")
+
+library(tidyverse)
+library(flowCore)
+library(ggcyto)
+library(patchwork)
+library(ggridges)
+library(scales)
+library(car)          # For Anova(type = "III")
+
+```
+
+# Read data
+## Read metadata
+```{r}
+#Read meta data and remove rows with missing file names
+meta.df <- read.csv(file = paste0(path, "01_FlowCytMetaData.csv"))
+meta.df$FileName <- na_if(meta.df$FileName, "")
+meta.df <- subset(meta.df, is.na(FileName) == FALSE)
+```
+
+## Read FCS-files
+```{r}
+#List FCS-files in the directory
+#filelist <- dir(pattern = ".fcs", full.names = FALSE)
+#Check that all filenames are the same in the directory and the metadata
+#filelist %in% meta.df$FileName
+#meta.df$FileName %in% filelist
+#replace the filelist with the FileName column in the metadata
+filelist <- paste0(path, meta.df$FileName)
+
+#Check that all the listed files are actually FCS-files.
+if (isFCSfile(files = filelist) %>% sum() == length(filelist)){
+  ##If they are FCS-files: Read all FCS-files to list
+  data.list <- lapply(filelist, read.FCS, transformation = FALSE, alter.names=TRUE)
+  names(data.list) <- meta.df$FileName
+  ##Some of the fcs-files have two more data columns "DAPI.W" and "APC"(Sox10)
+  ##All flowFrames in a flowSet need to have the same number of variables
+  ###Loop over data.list
+  for (i in 1:length(data.list)){
+    ###If florFrame has less than 12 variables, add "DAPI.W" and "APC"
+    if (data.list[[i]] %>% exprs() %>% ncol() < 12){
+      new.cols <- matrix(rep(NA, times = 2*nrow(data.list[[i]])),
+                         ncol = 2)
+      colnames(new.cols) <- c("DAPI.W", "APC.A")
+      data.list[[i]] <- fr_append_cols(fr = data.list[[i]], new.cols)
+    }
+    ##Reorder the columns so all flowFrames have the columns in the same order
+    exprs(data.list[[i]]) <- exprs(data.list[[i]])[,c("FSC.A", "FSC.H", "FSC.W", 
+                                                      "SSC.A", "SSC.H", "SSC.W", 
+                                                      "FITC.A", "APC.Cy7.A", 
+                                                      "DAPI.A", "DAPI.W", 
+                                                      "APC.A", "Time")]
+  }
+  ##Create a flowSet from data.list
+  data.fs <- as(data.list, "flowSet")
+} else {
+  #Otherwise: print error message
+  print(paste0("One of the files: ", filelist, " is not an FCS-file"))
+}
+rm(i, new.cols); gc()
+```
+
+## Subset data
+```{r}
+# This is based on manually going through all the scatter plots and lab notebooks 
+# to see which data is reliable
+#plot.fs <- data.fs[c(6:56, 62:82)]
+#data.fs <- data.fs[c(6:9, 11:19, 22, 24:29, 34:52, 62:66, 79:80)]
+
+# Excluding those with no LD-stain or different incubation times
+data.fs <- data.fs[c(6:9, 11:19, 22, 24:29, 34:52, 65:66, 79:80)]
+gc()
+```
+
+# Remove debri 
+## Construct 1st gate
+```{r}
+#Polygon gate (approx like by the instrument)
+#g1 <- matrix(c(30, 40, 120, 210, 200, 90, 40,
+#               10,  5,  10,  30,  80, 70, 20), 
+#             ncol = 2, nrow = 7) * 1000
+#colnames(g1) <- c("FSC.A","SSC.A")
+#g1
+#g1 <- polygonGate(filterId = "P1", boundaries = g1)
+#g1
+#data.ff_g1 <- flowCore::Subset(data.ff, g1)
+
+#Ellipsoid gate
+#exprs(data.ff)[, c("FSC.A", "SSC.A")] %>% var()
+g1_cov <- matrix(c(1.0*10^10, 1.8*10^9,
+                   1.8*10^ 9, 1.3*10^9),
+                 ncol = 2, nrow = 2,
+                 dimnames = list(c("FSC.A","SSC.A"), c("FSC.A","SSC.A")))
+#exprs(data.ff)[, "FSC.A"] %>% mean()
+#exprs(data.ff)[, "SSC.A"] %>% mean()
+g1_mean <- c("FSC.A"=1.2*10^5,"SSC.A"=3.7*10^4)
+g1 <- ellipsoidGate(filterId = "g1", .gate = g1_cov, mean = g1_mean)
+rm(g1_cov, g1_mean)
+data.fs_g1 <- flowCore::Subset(data.fs, g1)
+```
+
+### Plot 1st gate
+```{r}
+p1 <- ggcyto(data.fs, aes(x = FSC.A, y = SSC.A)) + 
+  geom_hex(bins = 40) +
+  geom_gate(g1) + 
+  theme(strip.text = element_text(size = 8),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 11)) + 
+  xlab(label = "FSC-A") + 
+  ylab(label = "SSC-A")
+p1
+```
+
+
+```{r}
+p1b <- ggcyto(data.fs@frames$Specimen_001_Pool6.fcs, 
+              aes(x = FSC.A, y = SSC.A)) + 
+  geom_hex(bins = 40) +
+  geom_gate(g1) + 
+  #geom_stats(type = c("percent"), location = "plot") + 
+  ggtitle(label = paste0("All data (n = ",
+                         exprs(data.fs@frames$Specimen_001_Pool6.fcs) %>% 
+                           nrow(),
+                         ")")) +
+  xlab(label = "FSC-A") + 
+  ylab(label = "SSC-A") +
+  theme_classic() +
+  theme(strip.text = element_blank(),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 8),
+        panel.background = element_rect(colour = "black", linewidth = .5),
+        axis.line = element_blank(),
+        legend.position = "none")
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel1.svg"), 
+#       plot = p1b, height = 45, width = 45, units = "mm")
+
+p1b
+```
+
+
+## Construct 2nd gate
+```{r}
+#Polygon gate (approx like by the instrument)
+#g2 <- matrix(c(10, 100, 120, 120, 110,  70,  40,  20,
+#               60,  90, 100, 120, 130, 130, 110, 100), 
+#             ncol = 2, nrow = 8) * 1000
+#colnames(g2) <- c("FSC.H","FSC.W")
+#g2
+#g2 <- polygonGate(filterId = "g2", boundaries = g2)
+#g2
+#data.ff_g2 <- flowCore::Subset(data.ff_g1, g2)
+
+#Ellipsoid gate
+#exprs(data.ff_g1)[, c("FSC.H","FSC.W")] %>% var()
+g2_cov <- matrix(c(3*10^9, 4*10^8,
+                   4*10^8, 2*10^9),
+                 ncol = 2, nrow = 2,
+                 dimnames = list(c("FSC.H","FSC.W"), c("FSC.H","FSC.W")))
+#exprs(data.ff_g1)[, "FSC.H"] %>% mean()
+#exprs(data.ff_g1)[, "FSC.W"] %>% mean()
+g2_mean <- c("FSC.H"=6.4*10^4,"FSC.W"=8.9*10^4)
+g2 <- ellipsoidGate(filterId = "Gate 2", .gate = g2_cov, mean = g2_mean)
+rm(g2_cov, g2_mean)
+data.fs_g2 <- flowCore::Subset(data.fs_g1, g2)
+```
+
+## Remove doublets and debri
+### Plot 2nd gate
+```{r}
+p2 <- ggcyto(data.fs_g1, aes(x = FSC.H, y = FSC.W)) + 
+  geom_hex(bins = 40) +
+  geom_gate(g2) + 
+  theme(axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 11)) +
+  ggtitle(label = "Gate 1") +
+  xlab(label = "FSC-H") + 
+  ylab(label = "FSC-W")
+p2
+```
+
+```{r}
+p2b <- ggcyto(data.fs_g1@frames$Specimen_001_Pool6.fcs, 
+              aes(x = FSC.H, y = FSC.W)) + 
+  geom_hex(bins = 40) +
+  geom_gate(g2) +
+  #geom_stats(type = c("percent"), location = "plot") + 
+  ggtitle(label = paste0("Gate 1 (n = ",
+                         exprs(data.fs_g1@frames$Specimen_001_Pool6.fcs) %>% 
+                           nrow(),
+                         ")")) +
+  xlab(label = "FSC-H") + 
+  ylab(label = "FSC-W") +
+  theme_classic() +
+  theme(strip.text = element_blank(),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 8),
+        panel.background = element_rect(colour = "black", linewidth = .5),
+        axis.line = element_blank(),
+        legend.position = "none")
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel2.png"),
+#       plot = p2b, height = 45, width = 45, units = "mm")  
+
+p2b
+```
+
+### Plot 2nd gate results
+```{r}
+p3 <- ggcyto(data.fs_g2, aes(x = FSC.A, y = FSC.H)) + 
+  geom_hex(bins = 40)+ 
+  #theme(strip.text = element_blank()) + 
+  theme(axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 11)) +
+  ggtitle(label = "Gate 2") +
+  xlab(label = "FSC-A") + 
+  ylab(label = "FSC-H")
+p3
+```
+
+```{r}
+p3b <- ggcyto(data.fs_g2@frames$Specimen_001_Pool6.fcs, 
+              aes(x = FSC.A, y = FSC.H)) + 
+  geom_hex(bins = 40)+ 
+  ggtitle(label = paste0("Gate 2 (n = ",
+                         exprs(data.fs_g2@frames$Specimen_001_Pool6.fcs) %>% 
+                           nrow(), 
+                         ")")) +
+  xlab(label = "FSC-A") + 
+  ylab(label = "FSC-H") +
+  theme_classic() +
+  theme(strip.text = element_blank(),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 8),
+        panel.background = element_rect(colour = "black", linewidth = .5),
+        axis.line = element_blank(),
+        legend.position = "none")
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel3.svg"),
+#       plot = p3b, height = 45, width = 45, units = "mm")
+
+p3b
+```
+
+
+# Remove dead cells
+## Construct 3rd gate
+```{r}
+g3 <- matrix(c(3.5*10^4, 2.45*10^5,
+                 -500,      550), 
+             ncol = 2, nrow = 2)
+colnames(g3) <- c("DAPI.A","APC.Cy7.A")
+g3
+g3 <- rectangleGate(filterId = "g3", boundaries = g3)
+g3
+data.fs_g3 <- flowCore::Subset(data.fs_g2, g3)
+```
+
+### Plot 3rd gate
+#### Subset plot data
+```{r}
+## Only keep data sets with >= 15000 cells
+x <-c()
+for (i in 1:length(data.fs_g2)){x[i] <- data.fs_g2[[i]] %>% exprs() %>% nrow()}
+x <- x >= 15000
+data.fs_g2 <- data.fs_g2[x]
+rm(i,x)
+```
+
+#### Plot
+```{r}
+p4 <- ggcyto(data.fs_g2, aes(x = DAPI.A, y = APC.Cy7.A)) + 
+  geom_hex(bins = 40) + 
+  geom_gate(g3) + 
+  #xlim(0, 10^6)+
+  scale_x_logicle() +
+  scale_y_logicle()+ 
+  #theme(strip.text = element_blank()) + 
+  theme(axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 11)) +
+  ggtitle(label = "Gate 2") +
+  xlab(label = "DAPI") + 
+  ylab(label = "Live/Dead (APC-Cy7)")
+p4
+```
+
+```{r}
+p4b <- ggcyto(data.fs_g2@frames$Specimen_001_Pool6.fcs, 
+              aes(x = DAPI.A, y = APC.Cy7.A)) + 
+  geom_hex(bins = 40) + 
+  #geom_stats(type = c("percent", "count"), location = "plot") +
+  geom_gate(g3) + 
+  #xlim(0, 10^6)+
+  scale_x_logicle() +
+  scale_y_logicle()+ 
+  ggtitle(label = paste0("Gate 2 (n = ",
+                         exprs(data.fs_g2@frames$Specimen_001_Pool6.fcs) %>% 
+                           nrow(),
+                         ")")) +
+  xlab(label = "DAPI") + 
+  ylab(label = "Live/Dead") +
+  theme_classic() +
+  theme(strip.text = element_blank(),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 8),
+        panel.background = element_rect(colour = "black", linewidth = .5),
+        axis.line = element_blank(),
+        legend.position = "none")
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel4.svg"),
+#       plot = p4b, height = 45, width = 45, units = "mm")
+  
+p4b
+```
+
+### Plot 3rd gate results
+```{r}
+data.fs_g3 <- data.fs_g3[!data.fs_g3@frames %>% names() %in% 
+                        c("Specimen_001_#5_1-800.fcs", "Specimen_001_#1_1-50.fcs", 
+                          "Specimen_001_#4_1-400.fcs", "Specimen_001_#3_1-200.fcs")]
+p6 <- ggcyto(data.fs_g3, aes(x = FITC.A, y = FSC.A)) + 
+  geom_hex(bins = 40) +
+  #geom_hex(binwidth = c(.02, 1000)) + #binwidth = c(vertical, horizontal)
+  scale_x_logicle() + 
+  #theme(strip.text = element_blank()) + 
+  theme(axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1)) +
+  theme(axis.title = element_text(size = 11)) +
+  theme(plot.title = element_text(size = 11)) +
+  ggtitle(label = "Gate 3") +
+  xlab(label = "HNK-1 (FITC)") + 
+  ylab(label = "FSC-A")
+p6
+```
+
+```{r}
+p6b <- ggcyto(data.fs_g3@frames$Specimen_001_Pool6.fcs, 
+              aes(x = FITC.A, y = FSC.A)) + 
+  geom_hex(bins = 40) +
+  scale_x_logicle() + 
+  ggtitle(label = paste0("Gate 3 (n = ",
+                         exprs(data.fs_g3@frames$Specimen_001_Pool6.fcs) %>% 
+                           nrow(),
+                         ")")) +
+  xlab(label = "HNK-1 (FITC)") + 
+  ylab(label = "FSC-A") +
+  theme_classic() +
+  theme(strip.text = element_blank(),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 8),
+        panel.background = element_rect(colour = "black", linewidth = .5),
+        axis.line = element_blank(),
+        legend.position = "none")
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/","FlowPlot_Panel6.svg"), 
+#       plot = p6b, height = 45, width = 90, units = "mm")
+  
+p6b
+```
+
+```{r}
+p6c <- ggcyto(data.fs_g3@frames$Specimen_001_DAPI_control.fcs , 
+              aes(x = FITC.A, y = FSC.A)) + 
+  geom_hex(bins = 20) +
+  scale_x_logicle() + 
+  coord_cartesian(xlim = c(-1e2, 1e4), ylim = c(0, 200000)) +
+  ggtitle(label = paste0("Gate 3 (n = ",
+                         exprs(data.fs_g3@frames$Specimen_001_Pool6.fcs) %>% 
+                           nrow(),
+                         ")")) +
+  xlab(label = "HNK-1 (FITC)") + 
+  ylab(label = "FSC-A") +
+  theme_classic() +
+  theme_classic() +
+  theme(strip.text = element_blank(),
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.title = element_text(size = 11),
+        plot.title = element_text(size = 8),
+        panel.background = element_rect(colour = "black", linewidth = .5),
+        axis.line = element_blank(),
+        legend.position = "none")
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/","FlowPlot_Panel6c.svg"), 
+#       plot = p6c, height = 45, width = 90, units = "mm")
+  
+p6c
+```
+
+### Plot DAPI and FITC histogram
+#### Subset plot data
+```{r}
+## Only keep data sets with >= 15000 cells
+x <-c()
+for (i in 1:length(data.fs_g3)){x[i] <- data.fs_g3[[i]] %>% exprs() %>% nrow()}
+x <- x >= 15000
+data.fs_g3 <- data.fs_g3[x]
+rm(i, x)
+```
+
+##### DAPI df
+```{r}
+# Extract the "DAPI.A" channel from each flowFrame
+dapi_values <- lapply(seq_along(data.fs_g3), function(i) {
+  # Extract data for the "DAPI.A" channel from the i-th flowFrame
+  flowFrame_data <- exprs(data.fs_g3[[i]])
+  return(flowFrame_data[, "DAPI.A"])
+})
+
+# Combine all the DAPI values into a single vector and create a corresponding label
+dapi_combined <- unlist(dapi_values)
+flowFrame_labels <- rep(1:length(data.fs_g3), sapply(dapi_values, length))
+flowFrame_labels <- names(data.fs_g3@frames)[flowFrame_labels]
+
+# Create a data frame
+dapi.df <- data.frame(DAPI_A = dapi_combined, FlowFrame = factor(flowFrame_labels))
+rm(dapi_values, flowFrame_labels, dapi_combined)
+
+# Add somite stage
+dapi.df <- merge(dapi.df, meta.df[,c("FileName", "SomStage")], 
+                 by.x = "FlowFrame", by.y = "FileName", all.x = TRUE)
+
+# Sort dapi.df by the SomStage column (assuming SomStage is numeric)
+dapi.df <- dapi.df %>%
+  arrange(SomStage) %>%  # Sort by SomStage
+  mutate(FlowFrame = factor(FlowFrame, levels = unique(FlowFrame)))  # Reorder the FlowFrame factor levels
+
+```
+
+##### FITC df
+```{r}
+# Extract the "FITC.A" channel from each flowFrame
+fitc_values <- lapply(seq_along(data.fs_g3), function(i) {
+  # Extract data for the "FITC.A" channel from the i-th flowFrame
+  flowFrame_data <- exprs(data.fs_g3[[i]])
+  return(flowFrame_data[, "FITC.A"])
+})
+
+# Combine all the FITC and values into a single vector and create a corresponding label
+fitc_combined <- unlist(fitc_values)
+flowFrame_labels <- rep(1:length(data.fs_g3), sapply(fitc_values, length))
+flowFrame_labels <- names(data.fs_g3@frames)[flowFrame_labels]
+
+# Create a data frame
+fitc.df <- data.frame(FITC_A = fitc_combined, 
+                      FlowFrame = factor(flowFrame_labels))
+
+# Add somite stage
+fitc.df <- merge(fitc.df, meta.df[,c("FileName", "SomStage", "Phen")], 
+                 by.x = "FlowFrame", by.y = "FileName", all.x = TRUE)
+
+# Sort fitc.df by the SomStage column
+fitc.df <- fitc.df %>%
+  arrange(SomStage) %>%  # Sort by SomStage
+  # Reorder factor levels
+  mutate(FlowFrame = factor(FlowFrame, levels = unique(FlowFrame))) 
+```
+
+```{r}
+dapi.df$FlowFrame %>% unique() %>% length()
+fitc.df$FlowFrame %>% unique() %>% length()
+```
+
+#### Plot DAPI
+```{r}
+# Subset to only include samples used for 10X and qPCR
+#include_10X_and_qPCR <- c("Specimen_001_Pool5.fcs", "Specimen_001_Pool6.fcs", 
+#             "05_Specimen_001_FG60_C2_E1.fcs", "06_Specimen_001_SMA32_C3_E1.fcs", 
+#             "07_Specimen_001_SMA35_C2_E5.fcs", "08_Specimen_001_FG60_C2_E2.fcs",
+#            "08_Specimen_001_SMA41_C2_E1.fcs", "09_Specimen_001_SMA44_C2_E5.fcs")
+#dapi.df <- dapi.df[dapi.df$FlowFrame %in% include_10X_and_qPCR,]
+
+# Create the ridgeplot using ggplot2 and ggridges
+p5  <- ggplot(dapi.df, aes(x = DAPI_A, y = FlowFrame, fill = SomStage)) + 
+  geom_density_ridges(scale = 6, alpha = .7) +
+  scale_x_logicle(breaks = c(3*10^4, 6*10^4, 9*10^4, 1.2*10^5, 1.5*10^5, 
+                             1.8*10^5, 2.1*10^5, 2.4*10^5)) +
+  labs(title = "Gate 3", x = "DAPI", y = "Density", fill = "Somites") +
+  #scale_y_discrete(labels = c("qPCR", "qPCR", rep("scRNA-seq", 6))) +
+  scale_y_discrete(labels = c(rep("Short label", 
+                                  length(unique(dapi.df$FlowFrame))))) +
+  guides(fill = guide_legend(reverse = FALSE, nrow = 1)) +
+  #Change some themes
+  theme(plot.margin = margin(t=1.7, r=2, b=1.7, l=0.4, unit = "mm"),
+        #Axes
+        axis.text = element_text(angle = 45, size = 5, vjust = 1, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_line(color = "black"),
+        #Titles
+        axis.title.x = element_text(hjust = 0.5, size = 8),
+        axis.title.y = element_text(hjust = 0.5, size = 8),
+        plot.title = element_text(size = 8, face = "plain"),
+        #legend.position = "none",
+        # Legend
+        legend.position = "bottom",
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(2.5, "mm"),
+        
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA)
+        )
+p5
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel5.svg"), 
+#       plot = p5, height = 112.7083, width = 56.750, units = "mm")
+```
+
+#### Plot FITC
+```{r}
+p7  <- ggplot(subset(fitc.df, FITC_A > -50 & FITC_A < 3*10^4), 
+              aes(x = FITC_A, y = FlowFrame, fill = SomStage)) + 
+  geom_density_ridges(scale = 5, alpha = .7) +
+  scale_x_logicle(breaks = c(0, 10^2, 10^3, 10^4)) +
+  labs(title = "Gate 3", x = "HNK-1 (FITC)", y = "Density", fill = "Somites") +
+  #scale_y_discrete(labels = c(rep("Short label", 
+  #                                length(unique(dapi.df$FlowFrame))))) +
+  guides(fill = guide_legend(reverse = FALSE, nrow = 1)) +
+  #Change some themes
+  theme(plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        # Axes
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_line(color = "black"),
+        # Titles
+        axis.title.x = element_text(hjust = 0.5, size = 11),
+        axis.title.y = element_text(hjust = 0.5, size = 11),
+        plot.title = element_text(size = 11, face = "plain"),
+        # Legend
+        legend.position = "bottom",
+        legend.title = element_text(size = 11),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(3, "mm"),
+        
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA)
+        )
+p7
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel7.svg"),
+#      plot = p7, height = 112.7083, width = 115.08335, units = "mm")
+```
+
+```{r}
+#p5andp7 <- wrap_plots(p5, p7, widths = c(1, 2)) + 
+#  plot_layout(guides = "collect") &
+#  theme(legend.position = "bottom")
+#p5andp7
+
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel5and7.svg"),
+#      plot = p5andp7, height = 112.7083, width = 173.4167, units = "mm")
+```
+
+##### Again, but centered
+Center the peak of each ridge at 0
+```{r}
+#fitc.df <- fitc.df %>% select(-peak, -FITC_logicle, -FITC_centered_logicle)
+
+# Apply logicle transform before centering
+logicle_transform <- flowCore::logicleTransform(w = 0.5, t = 262144, 
+                                                m = 4.5, a = 0)
+fitc.df <- fitc.df %>%
+  mutate(FITC_logicle = logicle_transform(FITC_A))
+
+# Compute peak on transformed values
+peaks <- fitc.df %>%
+  group_by(FlowFrame) %>%
+  summarize(peak = {
+    d <- density(FITC_logicle, n = 2^7, bw = 0.0291)#0.0557)
+    d$x[which.max(d$y)]
+  })
+
+# Center logicle-transformed values
+fitc.df <- fitc.df %>%
+  left_join(peaks, by = "FlowFrame") %>%
+  mutate(FITC_centered_logicle = FITC_logicle - peak)
+```
+
+```{r}
+p8 <- ggplot(fitc.df,
+             aes(x = FITC_centered_logicle, 
+                 y = FlowFrame, 
+                 fill = SomStage)) + 
+  # Draw ridges
+  geom_density_ridges(scale = 5, alpha = .7) +
+  
+  # Set breaks and x-limits to mimic the plots above
+  scale_x_continuous(
+    breaks = logicle_transform(c(0, 1e2, 1e3, 1e4)) - logicle_transform(0),
+    labels = c("0", "10²", "10³", "10⁴")) +
+  coord_cartesian(xlim=logicle_transform(c(-100, 1e4)) - logicle_transform(0)) +
+  #geom_vline(xintercept = 0) +
+
+  #Set aesthetics
+  labs(title = "Gate 3", x = "HNK-1 (FITC)", y = "Density", fill = "Somites") +
+  guides(fill = guide_legend(reverse = FALSE, nrow = 1)) +
+  theme(plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        # Axes
+        axis.text = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.ticks.x = element_line(color = "black"),
+        # Titles
+        axis.title.x = element_text(hjust = 0.5, size = 11),
+        axis.title.y = element_text(hjust = 0.5, size = 11),
+        plot.title = element_text(size = 8, face = "plain"),
+        # Legend
+        legend.position = "none",
+        legend.title = element_text(size = 11),
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(3, "mm"),
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA))
+
+ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel8.svg"),
+      plot = p8, height = 80, width = 90, units = "mm")
+
+p8
+```
+
+
+###### As histogram
+```{r}
+#[fitc.df$FlowFrame %in% unique(fitc.df$FlowFrame),]
+p8_hist <- ggplot(fitc.df,
+                  #subset(fitc.df, FITC_A > -50 & FITC_A < 3*10^4), 
+                  aes(x = FITC_centered_logicle, fill = SomStage)) + 
+  geom_histogram(bins = 2^7, alpha = 1, position = "identity") + #, color = "black") +
+  
+  # Set breaks and x-limits to mimic the plots above
+  scale_x_continuous(
+    breaks = logicle_transform(c(0, 1e2, 1e3, 1e4)) - logicle_transform(0),
+    labels = c("0", "10²", "10³", "10⁴")) +
+  coord_cartesian(xlim=logicle_transform(c(-100, 1e4)) - logicle_transform(0)) +
+  #geom_vline(xintercept=0) +
+  
+  # Do this for every FlowFrame
+  facet_wrap(~ FlowFrame, ncol = 2, scales = "free_y") +
+  
+  # Set some aesthetics
+  labs(title = "Gate 3", x = "HNK-1 (FITC)", y = "Count", fill = "Somites") +
+  guides(fill = guide_legend(reverse = FALSE, nrow = 1)) +
+  theme(
+    plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+    axis.text.x = element_text(angle = 45, size = 8, vjust = 1, hjust = 1),
+    axis.title.x = element_text(hjust = 0.5, size = 11),
+    axis.title.y = element_text(hjust = 0.5, size = 11),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 8, face = "plain"),
+    legend.position = "bottom",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 8),
+    legend.key.size = unit(3, "mm"),
+    plot.background = element_rect(fill = "white", color = "white"),
+    panel.background = element_rect(fill = "white", color = "white"),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    #panel.border = element_rect(colour = "black", fill = NA),
+    strip.text = element_blank(),
+    strip.background = element_blank()
+  )
+p8_hist
+```
+
+### Export panels for flow cyt plot
+```{r}
+
+ggsave(filename = "FlowPlot_Panel6.svg", plot = p6, 
+       height = 56.750, width = 115.08335, units = "mm")
+ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel7.svg"),
+       plot = p7, height = 112.7083, width = 115.08335, units = "mm")
+ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_Panel6c.svg"),
+       plot = p6c, height = 56.750, width = 115.08335, units = "mm")
+```
+
+# Green vs Brown FITC
+The centered distributions can be used to compare the number of NCCs in greens and
+browns
+## Remove intermediates
+```{r}
+# Subset to remove all intermediate phenotypes
+fitc_GvsB.df <- subset(fitc.df, Phen == "Green" |
+                         Phen == "Brown") %>%
+  mutate(Phen = case_when(
+    Phen == "Brown" ~ "Ancestral",
+    Phen == "Green" ~ "nigriventris"))
+str(fitc_GvsB.df)
+```
+
+## Prep DFs
+```{r}
+# Calc 95th percentile for each sample
+percentile_95 <- fitc_GvsB.df %>%
+  group_by(FlowFrame) %>%
+  summarise(p95 = quantile(FITC_centered_logicle, probs = 0.95, na.rm = TRUE),
+            Phen = first(Phen),
+            SomStage = as.numeric(first(SomStage))) %>%
+  ungroup()
+str(percentile_95)
+
+# Build label mapping: FlowFrame → SomStage
+somite_labels <- fitc_GvsB.df %>%
+  select(FlowFrame, SomStage) %>%
+  distinct() %>%
+  mutate(SomStage = paste0(SomStage, "ss")) %>%
+  deframe()  # Convert to named vector for scale_y_discrete
+str(somite_labels)
+```
+
+## Plot ridges
+```{r}
+p8b <- ggplot(fitc_GvsB.df,
+             aes(x = FITC_centered_logicle, 
+                 y = FlowFrame, 
+                 fill = Phen)) + 
+  # Draw ridges
+  geom_density_ridges(scale = 5, alpha = .7) +
+  scale_fill_manual(values = c("#bf7836ff", "#9bd839ff")) +
+  
+  # Set breaks and x-limits to mimic the plots above
+  scale_x_continuous(
+    breaks = logicle_transform(c(0, 1e2, 1e3, 1e4)) - logicle_transform(0),
+    labels = c("0", "10²", "10³", "10⁴")) +
+  coord_cartesian(xlim=logicle_transform(c(-100, 1e4)) - logicle_transform(0)) +
+  #geom_vline(xintercept = 0) +
+  
+  # Add vlines for 95th percentiles
+  geom_point(data = percentile_95,
+             aes(x = p95, y = FlowFrame, fill = Phen),
+             shape = 23, size = 2, color = "black", alpha = 0.7) +
+  geom_point(data = percentile_95,
+             aes(x = p95, y = 0.5, color = Phen, alpha = 0.7),
+             shape = 18, size = 2) +
+  geom_vline(data = percentile_95,
+             aes(xintercept = p95, color = Phen, alpha = 0.7),
+             linetype = "dashed", linewidth = 0.3) +
+  scale_color_manual(values = c("Ancestral"= "#bf7836ff", 
+                                "nigriventris"= "#9bd839ff")) +
+
+  #Set aesthetics
+  scale_y_discrete(labels = somite_labels) +
+  labs(title = "Gate 3", x = "HNK-1 (FITC)", y = "Density", fill ="Phenotype") +
+  guides(#fill = guide_legend(reverse = FALSE, nrow = 2), 
+         color = "none", alpha = "none") +
+  theme(plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        # Axes
+        axis.text = element_text(angle = 45, size = 5, vjust = 1, hjust = 1),
+        axis.ticks.y = element_line(color = "black"),
+        axis.ticks.x = element_line(color = "black"),
+        # Titles
+        axis.title.x = element_text(hjust = 0.5, size = 6),
+        axis.title.y = element_text(hjust = 0.5, size = 6),
+        plot.title = element_blank(),
+        #plot.title = element_text(size = 8, face = "plain"),
+        # Legend
+        legend.position = "inside",
+        legend.position.inside = c(0.995, 0.995),
+        legend.justification = c("right", "top"),
+        legend.title = element_text(size = 6),
+        legend.text = element_text(size = 5),
+        legend.key.size = unit(3, "mm"),
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA))
+p8b
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_GvsB_Ridges.svg"),
+#      plot = p8b, height = 86, width = 86, units = "mm")
+```
+
+## Plot violins
+```{r}
+p8c <- ggplot(percentile_95, aes(x = Phen, y = p95, fill = Phen)) +
+  # Draw violins and jitter
+  geom_violin(alpha = 0.7) +
+  geom_jitter(width = 0.05, shape = 23, size = 2, color = "black", alpha = 0.7) +
+  
+  # Set breaks and x-limits to mimic the plots above
+  scale_y_continuous(
+    breaks = logicle_transform(c(1e2, 2e2, 3e2, 4e2, 5e2, 
+                                 6e2, 7e2, 8e2, 9e2, 1e3)) - logicle_transform(0),
+    labels = c("10²", "20²", "30²", "40²", "50²", 
+               "60²", "70²", "80²", "90²", "10³")) +
+  coord_cartesian(ylim=logicle_transform(c(1e2, 1e3)) - logicle_transform(0)) +
+  
+  scale_fill_manual(values = c("Ancestral"= "#bf7836ff", 
+                                "nigriventris"= "#9bd839ff")) +
+  labs(y = "HNK-1 (FITC)", fill = "Phenotype") +
+  coord_flip() +
+  theme_classic() +
+  theme(axis.text = element_text(angle = 45, vjust = 0.5, hjust = 1, size = 5),
+        axis.title = element_text(size = 6),
+        #y-axis
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y =element_blank(),
+        #legend
+        legend.position = "none")
+p8c
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_GvsB_Viols.png"),
+#      plot = p8c, height = 43, width = 43, units = "mm")
+```
+
+## Plot error bars
+```{r}
+# Summarize the data: mean and SE of p95 per Phen
+summary_df <- percentile_95 %>%
+  group_by(Phen) %>%
+  summarise(mean_p95 = mean(p95),
+            se_p95   = sd(p95) / sqrt(n()),
+            .groups  = "drop")
+# Plot
+p8d <- ggplot(data = summary_df, aes(y = Phen, x = mean_p95)) +
+  
+  # Individual datapoints
+  geom_jitter(data = percentile_95, 
+              aes(x = p95, y = Phen, color = Phen), 
+              height = 0.1, shape = 18, size = 2, alpha = 0.5) +
+
+  # Mean and error bars
+  geom_point(aes(color = Phen), shape = 15, size = 1) +
+  geom_errorbar(aes(xmin=mean_p95-se_p95, xmax = mean_p95+se_p95, color = Phen),
+                width = 0) +
+  
+  # Set colors of everything
+  scale_color_manual(values = c("Ancestral"   = "#bf7836ff", 
+                                "nigriventris"= "#9bd839ff")) +
+  
+  # Set breaks labels and limits on x-axiss
+  scale_x_continuous(
+    breaks = logicle_transform(c(1e2, 2e2, 3e2, 4e2, 5e2, 
+                                 6e2, 7e2, 8e2, 1e3)) - logicle_transform(0),
+    labels = c("10²", "20²", "30²", "40²", "50²", 
+               "60²", "70²", "80²", "10³")) +
+  coord_cartesian(xlim=logicle_transform(c(1.5e2, 1.2e3))-logicle_transform(0))+
+  
+  # Set labels on y-axis
+  scale_y_discrete(labels = c("A", "n")) + 
+  
+  # Set some esthetics
+  labs(x = "HNK-1 (FITC)", y = "Phenotype") +
+  theme_classic() +
+  theme(axis.text.x =element_text(angle = 45, vjust = 0.5, hjust = 1, size = 5),
+        axis.title.x = element_text(size = 6),
+        #y-axis
+        axis.title.y = element_text(size = 6),
+        axis.text.y = element_text(angle = 45, size = 5),
+        #axis.ticks.y =element_blank(),
+        #legend
+        legend.position = "none",
+        #legend.text = element_text(size = 5),
+        #legend.title = element_text(size = 6),
+        #legend.key.size = unit(3, "mm")
+        )
+p8d
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_GvsB_ErrBars.svg"),
+#      plot = p8d, height = 43, width = 43, units = "mm")
+```
+
+
+## Plot scatter
+```{r}
+p8d <- ggplot(percentile_95, aes(x = SomStage, y = p95, 
+                                 color = Phen, fill = Phen)) +
+  geom_point(size = 2, alpha = 0.7, shape = 18) +
+  
+  # Linear regression lines per group
+  geom_smooth(method = "lm", se = TRUE, size = 0.5) +
+  
+  scale_color_manual(values = c("Ancestral"= "#bf7836ff", 
+                                "nigriventris"= "#9bd839ff")) +
+  scale_fill_manual(values = c("Ancestral"= "#bf7836ff", 
+                                "nigriventris"= "#9bd839ff")) +
+  scale_x_continuous(breaks = seq(14, 42, 7),
+                     labels = paste0(seq(14, 42, 7), "ss")) +
+  
+  # Set breaks and x-limits to mimic the plots above
+  scale_y_continuous(
+    breaks = logicle_transform(c(1e2, 2e2, 3e2, 4e2, 5e2, 
+                                 6e2, 8e2, 1e3)) - logicle_transform(0),
+    labels = c("10²", "20²", "30²", "40²", "50²", 
+               "60²", "80²", "10³")) +
+  coord_cartesian(ylim =logicle_transform(c(1e2, 1e3)) - logicle_transform(0)) +
+  
+  labs(y = "HNK-1 (FITC)", x = "Developmental stage") +
+  theme_classic() +
+  theme(axis.text = element_text(angle = 45, vjust = 0.5, hjust = 1, size = 5),
+        axis.title = element_text(size = 6),
+        legend.position = "none")
+p8d
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "FlowPlot_GvsB_scatter.svg"),
+#      plot = p8d, height = 43, width = 43, units = "mm")
+```
+
+## Test
+```{r}
+percentile_95$Phen <- as.factor(percentile_95$Phen)
+str(percentile_95)
+contrasts(percentile_95$Phen) <- contr.sum(2)
+
+p95.lm <- lm(p95 ~ Phen  * SomStage, data = percentile_95)
+
+#anova(p95.lm)
+#Anova(p95.lm, type = "II")
+Anova(p95.lm, type = "III")
+```
+
+```{r}
+wilcox.test(p95 ~ Phen, data = percentile_95)
+```
+
+
+# qPCR
+## Construct sort gates
+```{r}
+g_nega <- matrix(c( -120,    248,
+                   20000, 194000),
+                 ncol = 2, nrow = 2)
+colnames(g_nega) <- c("FITC.A","FSC.A")
+g_nega <- rectangleGate(filterId = "g_nega", boundaries = g_nega)
+
+g_10pe <- matrix(c(  248,    477,
+                   20000, 194000),
+                 ncol = 2, nrow = 2)
+colnames(g_10pe) <- c("FITC.A","FSC.A")
+g_10pe <- rectangleGate(filterId = "g_10pe", boundaries = g_10pe)
+
+g_5per <- matrix(c(  477,    880,
+                   20000, 194000),
+                 ncol = 2, nrow = 2)
+colnames(g_5per) <- c("FITC.A","FSC.A")
+g_5per <- rectangleGate(filterId = "g_5per", boundaries = g_5per)
+
+g_2.5p <- matrix(c(  880,  14500,
+                   20000, 194000),
+                 ncol = 2, nrow = 2)
+colnames(g_2.5p) <- c("FITC.A","FSC.A")
+g_2.5p <- rectangleGate(filterId = "g_2.5p", boundaries = g_2.5p)
+```
+
+## Plot sorting gates
+```{r}
+p9 <- ggcyto(data.fs_g3@frames$Specimen_001_Pool6.fcs, 
+             aes(x = FITC.A, y = FSC.A)) + 
+  geom_hex(bins = 40) +
+  scale_x_logicle() +
+  geom_gate(g_nega) + 
+  geom_gate(g_10pe) +
+  geom_gate(g_5per) +
+  geom_gate(g_2.5p) +
+  geom_stats(type = "percent", digits = 2) + 
+  theme(strip.text = element_blank()) + 
+  theme(axis.text = element_text(angle = 45, size = 5, vjust = 1, hjust = 1)) +
+  theme(axis.title = element_text(size = 8)) +
+  theme(plot.title = element_text(size = 8)) +
+  ggtitle(label = "Gate 3") +
+  xlab(label = "HNK-1 (FITC)") + 
+  ylab(label = "FSC-A")
+p9
+```
+## Export panel for qPCR plot
+```{r}
+#ggsave(filename = paste0(path, "../02_FlowCytResults/", "qPCRPlot_Panel1.svg"),
+#      plot = p9, height = 56.750, width = 83.41668, units = "mm")
+```
+

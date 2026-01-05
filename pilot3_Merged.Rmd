@@ -1,0 +1,790 @@
+---
+title: "pilot3_Merged"
+author: "Robin Pranter"
+date: "2024-10-01"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up 
+
+Set up workspace, read libraries and source functions. 
+```{r, message=FALSE, echo=FALSE}
+# Increase maximum memory available to R
+options(future.globals.maxSize= 60000*(1024^2))
+Sys.setenv(R_MAX_VSIZE = "60Gb")
+
+rm(list = ls()); invisible(gc())
+start_time <- Sys.time()
+
+# Load libraries
+library(Seurat)
+library(tidyverse)
+library(patchwork)
+library(DoubletFinder)
+library(latex2exp)
+library(emmeans)
+
+path <- paste0("C:/Users/pranter/Desktop/Transfer20251124/PhD_RobinPranter/", 
+               "01_Projects/04_NCCEnrichmentMethod/")
+
+source(paste0(path, "06_10XAnalysis/pilot2_03_Functions.R"))
+```
+
+# Read data & prep SO
+```{r}
+#Load data
+Pmur_82.dgCMat <- Seurat::Read10X_h5(filename = paste0(path,
+                    "05_10XData/10X_21_082_mod_filtered_feature_bc_matrix.h5"),
+                    use.names = T)
+Pmur_84.dgCMat <- Seurat::Read10X_h5(filename = paste0(path, 
+                    "05_10XData/10X_21_084_mod_filtered_feature_bc_matrix.h5"),
+                    use.names = T)
+Pmur_85.dgCMat <- Seurat::Read10X_h5(filename = paste0(path, 
+                    "05_10XData/10X_21_085_mod_filtered_feature_bc_matrix.h5"),
+                    use.names = T)
+
+#Create seurat objects 
+Pmur_82.SO <- CreateSeuratObject(Pmur_82.dgCMat, project = "Pmur_82")
+Pmur_84.SO <- CreateSeuratObject(Pmur_84.dgCMat, project = "Pmur_84")
+Pmur_85.SO <- CreateSeuratObject(Pmur_85.dgCMat, project = "Pmur_85")
+rm(Pmur_82.dgCMat, Pmur_84.dgCMat, Pmur_85.dgCMat); invisible(gc())
+
+#Add Sorted/unsorted in metadata
+Pmur_82.SO$type <- "Sorted"
+Pmur_84.SO$type <- "Unsort"
+Pmur_85.SO$type <- "Unsort"
+
+#Randomly subsample for faster computation
+#Pmur_82.SO <- Pmur_82.SO[, sample(colnames(Pmur_82.SO), size =1000, replace=F)]
+#Pmur_84.SO <- Pmur_84.SO[, sample(colnames(Pmur_84.SO), size =1000, replace=F)]
+#Pmur_85.SO <- Pmur_85.SO[, sample(colnames(Pmur_85.SO), size =1000, replace=F)]
+#OBS this is not intended to be used in the real analysis
+
+# Merge objects
+all.SO <- merge(Pmur_82.SO, c(Pmur_84.SO, Pmur_85.SO), 
+                add.cell.ids = c("Pmur_82.SO", "Pmur_84.SO", "Pmur_85.SO"))
+rm(Pmur_82.SO, Pmur_84.SO, Pmur_85.SO); invisible(gc())
+
+# Join layers
+all.SO[["RNA"]] <- JoinLayers(all.SO[["RNA"]])
+# (the counts layers in the RNA assays gets added as separate layers for each
+# sample in the merged object. Here I join them together in one layer)
+```
+
+## Basic stats for the methods paper
+```{r}
+all.SO@meta.data %>% 
+  group_by(type) %>% 
+  summarize(n = n(),
+            av_count = mean(nCount_RNA) %>% round(),
+            sd_count = sd(nCount_RNA) %>% round(),
+            av_genes = mean(nFeature_RNA) %>% round(),
+            sd_genes = sd(nFeature_RNA) %>% round()) %>%
+  t()
+```
+
+
+# Calc metadata
+```{r}
+## %mitochondrial reads
+#Define list of mitochondrial genes
+mito_genes <- c("ND1", "CYTB", "ND6", "ND5", "ND4",  #This is all mitochondrial
+                "ND4L", "ND3", "COX3", "ATP6",       #genes in mitochondrial 
+                "ATP8", "COX2", "COX1", "ND2")       #reference genome 
+#NCBI: FJ460597.1
+all.SO <- PercentageFeatureSet(all.SO,
+                               features = mito_genes,
+                               col.name = "percent.mt")
+
+## %ribosomal reads
+#Define list of ribosomal genes
+ribo_genes <- rownames(all.SO)[grep("^RP[SL]", rownames(all.SO))]
+all.SO <- PercentageFeatureSet(all.SO,
+                               features = ribo_genes,
+                               col.name = "percent.rb")
+
+## list meta data variables
+names(all.SO@meta.data)
+```
+
+# Plot QC meta data (no filter)
+## Violins
+```{r}
+# Choose features to plot
+feats <- c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent.rb")
+# Create a VlnPlot for each feature
+P01 <- VlnPlot(all.SO, features = feats, 
+               group.by = "orig.ident", 
+               pt.size = 0)
+P01
+```
+
+## Scatter
+```{r}
+P02 <- list(
+  FeatureScatter(all.SO, "nCount_RNA", "nFeature_RNA", group.by = "orig.ident", 
+                 pt.size = .1),
+  FeatureScatter(all.SO, "nCount_RNA", "percent.mt", group.by = "orig.ident",
+                 pt.size = .1),
+  FeatureScatter(all.SO, "nCount_RNA", "percent.rb", group.by = "orig.ident",
+                 pt.size = .1)
+)
+P02 <- wrap_plots(P02, ncol = 2) + plot_layout(guides = "collect")
+P02
+```
+Pmur_84 is quite bimodal in nCount and nFeature and also has something going on 
+in parcent.mt.
+
+
+# Filter
+I do three types of filtering: detection based filtering, filtering based on 
+QC-metrics and removal of doublets.
+
+## Detection based filtering
+By "detection based filtering" I mean removal of cells with low numbers of 
+detected genes and removal of genes that are detected in few cells.
+```{r}
+#Select cells
+selected_c <- WhichCells(all.SO, expression = nFeature_RNA > 700)
+
+#Select genes
+#selected_f <- rownames(all.SO)[
+#  Matrix::rowSums(all.SO@assays$RNA@layers$counts) > 3]
+selected_f <- rownames(all.SO)[
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) >= 20]
+
+#Filter
+filt.SO <- subset(all.SO, cells = selected_c, features = selected_f)
+rm(selected_c, selected_f)
+
+#Also remove the extreme outlyer in nCount_RNA.
+selected_c <- WhichCells(all.SO, expression = nCount_RNA < 90000)
+filt.SO <- subset(filt.SO, cells = selected_c)
+rm(selected_c)
+
+#also remove ribo and mito genes
+filt.SO <- filt.SO[ ! rownames(filt.SO) %in% mito_genes, ]
+filt.SO <- filt.SO[ ! rownames(filt.SO) %in% ribo_genes, ]
+
+dim(all.SO)
+dim(filt.SO)
+table(all.SO$orig.ident)
+table(filt.SO$orig.ident)
+#rm(all.SO);invisible(gc())
+```
+
+### Plot QCs again
+```{r}
+P03 <- list(VlnPlot(filt.SO, features = "nFeature_RNA", 
+                    group.by = "orig.ident", 
+                   pt.size = 0, alpha = 0.5) + 
+             geom_abline(slope = 0, intercept = 700),
+            VlnPlot(filt.SO, features = "percent.mt", 
+                    group.by = "orig.ident", 
+                    pt.size = 0, alpha = 0.5),
+            VlnPlot(filt.SO, features = "nCount_RNA", 
+                    group.by = "orig.ident", 
+                    pt.size = 0, alpha = 0.5) + 
+              geom_abline(slope = 0, intercept = 90000),
+            VlnPlot(filt.SO, features = "percent.rb", 
+                    group.by = "orig.ident", 
+                    pt.size = 0, alpha = 0.5))
+P03 <- wrap_plots(P03, ncol = 2) + plot_layout(guides = "collect")
+P03
+```
+
+```{r}
+P04 <- VlnPlot(filt.SO, features = feats, 
+               group.by = "orig.ident", 
+               pt.size = 0)
+P04
+```
+The detection based filtering (removing cells with less than 700 genes) not only
+removed the bimodality in nFeature_RAN but also in nCount_RNA. However, it did 
+not solve the issue with cells with high percent.mt, I will filter this targeted
+below. Also, in order to make the three samples more similar percent.rb should
+be filtered. Some cells have very high nCount_RNA and nFetaure_RNA, but these
+are likely doublets. I will do doublet detection bellow so for now I don't
+filter these.
+
+## QC-metric filtering
+```{r}
+# Select cells
+selected_mito <- WhichCells(filt.SO, expression = percent.mt < 15)
+selected_ribo <- WhichCells(filt.SO, expression = percent.rb > 15)
+
+#and subset to only keep those cells
+filt.SO <- subset(filt.SO, cells = selected_mito)
+filt.SO <- subset(filt.SO, cells = selected_ribo)
+rm(selected_mito, selected_ribo)
+
+dim(filt.SO)
+```
+
+### Plot QCs again
+#### Violins
+```{r}
+P05 <- VlnPlot(filt.SO, features = feats, 
+               group.by = "orig.ident", 
+               pt.size = 0)
+P05
+```
+
+#### Scatter
+```{r}
+P06 <- list(
+  FeatureScatter(filt.SO, "nCount_RNA", "nFeature_RNA", group.by = "orig.ident", 
+                 pt.size = .1),
+  FeatureScatter(filt.SO, "nCount_RNA", "percent.mt", group.by = "orig.ident",
+                 pt.size = .1),
+  FeatureScatter(filt.SO, "nCount_RNA", "percent.rb", group.by = "orig.ident",
+                 pt.size = .1))
+P06 <- wrap_plots(P06, ncol = 2) + plot_layout(guides = "collect")
+P06
+```
+Except for the cells with very high nCount_RNA and nFeature_RNA all looks good now.
+
+## Cell cykle state
+Since the sorted sample is sorted based on DAPI while the unsorted samples are
+unsorted it is important to check that the samples don't differ in cell cycle.
+
+### Prep SO for CC-scoring
+```{r}
+# Normalize and scale data and find variable features (all in SCTransform())
+filt.SO <- SCTransform(filt.SO,
+                       assay = 'RNA',
+                       new.assay.name = 'SCT',
+                       vars.to.regress = c('percent.mt'),
+                       method = "glmGamPoi",
+                       variable.features.n = 3000) #3000 is default
+```
+
+### Find CC-markers
+#### Read Lizard Human Ortho-table
+```{r}
+Ortho.df <- read.csv(file=paste0(path, "06_10XAnalysis/", 
+                            "Pmur1.0Human_OrthoTable_BioMartManDL20241206.txt"))
+```
+
+#### Find Lizard S and G2M orthos
+```{r}
+# Save S and G2M markers in Pmur
+G2M.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                        cc.genes.updated.2019$g2m.genes, ]$Gene.name
+S.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                      cc.genes.updated.2019$s.genes, ]$Gene.name
+
+#Check that the markers are present in the data
+print(paste0(filt.SO %>% Features() %in% G2M.genes %>% sum(), "/",
+             G2M.genes %>% length(), 
+             " G2M-markers are present in the data"))
+print(paste0(filt.SO %>% Features() %in% S.genes %>% sum(), "/",
+             S.genes %>% length(), 
+             " S-markers are present in the data"))
+
+#Subset only the genes that are present
+G2M.genes <- G2M.genes[G2M.genes %in% Features(filt.SO)]
+S.genes <- S.genes[S.genes %in% Features(filt.SO)]
+```
+
+### Calc score
+```{r}
+# Predict cell cycle state (make sure to specify the "assay" parameter)
+filt.SO <- CellCycleScoring(filt.SO,
+                            s.features = S.genes,
+                            g2m.features = G2M.genes,
+                            assay = 'SCT',
+                            set.ident = TRUE)
+```
+
+```{r}
+P07 <- VlnPlot(filt.SO, features = c("S.Score", "G2M.Score"), 
+               group.by = "orig.ident", 
+               pt.size = .1)
+P07
+```
+
+```{r}
+P08 <- FeatureScatter(filt.SO, "S.Score", "G2M.Score", group.by = "Phase", 
+                      split.by = "orig.ident")
+P08
+```
+There does not seem to be big differences in cell cycle between the samples.
+
+## Doublet filter
+To remove doublet cells I will use the package doublet finder (DF). First I need
+a UMAP and cluster classifications. Then I can estimate some parameters for the
+doublet prediction. Last I can run the prediction and remove the predicted
+doublets. One of the parameters (the estimated doublet percentage, here names
+EstDoubPerc) can not be estimated from the data but must be set by myself 
+informed by the literature. 
+
+### Prep SO for DF
+Doublet finder needs clusters to calc doublets. Here I run the standard Seurat 
+pipeline for clustering. I will redo this later after all filtering is finished. 
+```{r}
+#, message=FALSE}
+#Reduce dimensions using PCA and UMAP
+filt.SO <- RunPCA(filt.SO, verbose = F, npcs = 20, assay = "SCT") #SCT is calced 
+filt.SO <- RunUMAP(filt.SO, dims = 1:10, verbose = F)             #above for 
+#Cluster                                                          #cc-score
+filt.SO <- FindNeighbors(filt.SO, dims = 1:10)
+filt.SO <- FindClusters(filt.SO)
+
+#DF should be run on each sample separately. 
+#Therefor I split the SO in to six SOs and store them in a list
+
+HVGs <- VariableFeatures(filt.SO)
+split.list <- SplitObject(filt.SO, split.by = "orig.ident")
+```
+
+### Predict doublets
+#### Est pK & set exp % doublets
+```{r}
+#pK Identification (no ground-truth)
+#sweep.list <- paramSweep(split.list$Pmur_85, PCs = 1:10, sct = TRUE) #choose sample
+#sweep.stat <- summarizeSweep(sweep.list, GT = FALSE)
+#bcmvn_Pmur <- find.pK(sweep.stat)
+
+#Plot pK values against the mean-variance normalized bimodality coefficient
+#plot(as.numeric(as.character(bcmvn_Pmur$pK)), bcmvn_Pmur$BCmetric, type = "b")
+#subset(bcmvn_Pmur, subset = BCmetric == max(bcmvn_Pmur$BCmetric))
+
+#Set estimated pK based on plot from find.pK() above 
+est_pK_82 <- .07
+est_pK_84 <- .05
+est_pK_85 <- .09
+
+#Set exp perc doublets based on table under point 8 here: 
+#https://nbisweden.github.io/workshop-scRNAseq/labs/seurat/seurat_01_qc.html
+ExpDubPerc_82 <- .03
+ExpDubPerc_84 <- .065
+ExpDubPerc_85 <- .05
+
+#Based on expected doublet percentage, Homotypic Doublet Proportion Estimate
+homotypic.prop_82 <- modelHomotypic(split.list$Pmur_82@meta.data$seurat_clusters)
+nExp_poi_82       <- round(ExpDubPerc_82*nrow(split.list$Pmur_82@meta.data))
+nExp_poi.adj_82   <- round(nExp_poi_82*(1-homotypic.prop_82))
+
+homotypic.prop_84 <- modelHomotypic(split.list$Pmur_84@meta.data$seurat_clusters)
+nExp_poi_84       <- round(ExpDubPerc_84*nrow(split.list$Pmur_84@meta.data))
+nExp_poi.adj_84   <- round(nExp_poi_84*(1-homotypic.prop_84))
+
+homotypic.prop_85 <- modelHomotypic(split.list$Pmur_85@meta.data$seurat_clusters)
+nExp_poi_85       <- round(ExpDubPerc_85*nrow(split.list$Pmur_85@meta.data))
+nExp_poi.adj_85   <- round(nExp_poi_85*(1-homotypic.prop_85))
+```
+
+#### Run DoubletFinder
+```{r, message = FALSE}
+#Using the unadjusted poison expected doublet number -nExp_poi_Px-
+split.list$Pmur_82 <- doubletFinder(split.list$Pmur_82, 
+                                    PCs = 1:10,
+                                    pN = 0.25, 
+                                    pK = est_pK_82, 
+                                    nExp = nExp_poi_82, 
+                                    reuse.pANN = NULL, 
+                                    sct = TRUE)
+names(split.list$Pmur_82@meta.data)[grepl("DF.classification", 
+                              names(split.list$Pmur_82@meta.data))] <- "DF.pred"
+sum(split.list$Pmur_82@meta.data$DF.pred == "Singlet")
+nrow(split.list$Pmur_82@meta.data)
+#DimPlot(split.list$Pmur_82, group.by = "DF.classifications_0.25_0.07_94")
+
+#Using the adjusted poison expected doublet number -nExp_poi.adj_Px-
+##The adjusted value turned out similar to the unadjusted one so I did not run DF 
+#using these for the other two samples
+#split.list$Pmur_82 <- doubletFinder(split.list$Pmur_82, 
+#                         PCs = 1:10, #Using 1:10 or 1:30 results in the same doublets
+#                         pN = 0.25, 
+#                         pK = est_pK_82, 
+#                         nExp = nExp_poi.adj_82, 
+#                         reuse.pANN = FALSE, 
+#                         sct = TRUE)
+#sum(split.list$Pmur_82@meta.data$DF.classifications_0.25_0.07_82 == "Singlet")
+#nrow(split.list$Pmur_82@meta.data)
+#DimPlot(split.list$Pmur_82, group.by = "DF.classifications_0.25_0.07_82")
+
+#Using the unadjusted poison expected doublet number -nExp_poi_Px-
+split.list$Pmur_84 <- doubletFinder(split.list$Pmur_84, 
+                                    PCs = 1:10,
+                                    pN = 0.25, 
+                                    pK = est_pK_84, 
+                                    nExp = nExp_poi_84, 
+                                    reuse.pANN = NULL, 
+                                    sct = TRUE)
+names(split.list$Pmur_84@meta.data)[grepl("DF.classification", 
+                              names(split.list$Pmur_84@meta.data))] <- "DF.pred"
+sum(split.list$Pmur_84@meta.data$DF.pred == "Singlet")
+nrow(split.list$Pmur_84@meta.data)
+
+split.list$Pmur_85 <- doubletFinder(split.list$Pmur_85, 
+                                    PCs = 1:10,
+                                    pN = 0.25, 
+                                    pK = est_pK_85, 
+                                    nExp = nExp_poi_85, 
+                                    reuse.pANN = NULL, 
+                                    sct = TRUE)
+names(split.list$Pmur_85@meta.data)[grepl("DF.classification", 
+                              names(split.list$Pmur_85@meta.data))] <- "DF.pred"
+sum(split.list$Pmur_85@meta.data$DF.pred == "Singlet")
+nrow(split.list$Pmur_85@meta.data)
+gc()
+```
+
+### Merge data
+```{r}
+#Merge
+filt.SO <- merge(split.list$Pmur_82, c(split.list$Pmur_84, split.list$Pmur_85))
+filt.SO[["RNA"]] <- JoinLayers(filt.SO[["RNA"]])
+VariableFeatures(filt.SO) <- HVGs; rm(HVGs)
+```
+
+### Plot DF
+```{r}
+P09 <- wrap_plots(
+  VlnPlot(filt.SO, features = "nFeature_RNA", group.by = "orig.ident", 
+          split.by = "DF.pred", pt.size = .1),
+  VlnPlot(filt.SO, features = "nCount_RNA", group.by = "orig.ident", 
+          split.by = "DF.pred", pt.size = .1), 
+  ncol = 2)  + plot_layout(guides = "collect")
+P09
+```
+
+#### in umap
+```{r}
+#Reduce dimensions using PCA and UMAP
+filt.SO <- RunPCA(filt.SO, verbose = F, npcs = 20, assay = "SCT")
+filt.SO <- RunUMAP(filt.SO, dims = 1:10, verbose = F)
+DimPlot(filt.SO, group.by = "DF.pred", reduction = "umap")
+```
+
+### Remove doublets
+Judgeing by the violin plots the predicted doublets might not even be doublets 
+(they don't have higher than expected gene expression). However, I will remove 
+them anyway to be conservative.
+
+```{r}
+#Filter
+dim(filt.SO)
+filt.SO <- subset(filt.SO, DF.pred == "Singlet")
+dim(filt.SO)
+
+#Remove spacious objects
+rm(split.list,
+   est_pK_82, est_pK_84, est_pK_85,
+   
+   homotypic.prop_82, homotypic.prop_84, homotypic.prop_85, 
+   
+   nExp_poi.adj_82, nExp_poi.adj_84, nExp_poi.adj_85,
+   
+   nExp_poi_82, nExp_poi_84, nExp_poi_85,
+   
+   ExpDubPerc_82, ExpDubPerc_84, ExpDubPerc_85); invisible(gc())
+```
+
+### Plot QCs again
+#### Violins
+```{r}
+P10 <- VlnPlot(filt.SO, features = feats, 
+               group.by = "orig.ident", 
+               pt.size = 0)
+P10
+```
+
+#### Scatter
+```{r}
+P11 <- list(FeatureScatter(filt.SO, "nCount_RNA", "nFeature_RNA", 
+                           group.by = "orig.ident", pt.size = .1),
+            FeatureScatter(filt.SO, "nCount_RNA", "percent.mt", 
+                           group.by = "orig.ident", pt.size = .1),
+            FeatureScatter(filt.SO, "nCount_RNA", "percent.rb", 
+                           group.by = "orig.ident", pt.size = .1))
+P11 <- wrap_plots(P11, ncol = 2) + plot_layout(guides = "collect")
+P11
+```
+The cells with extremely high nCount_RNA and nFeature_RNA were not removed by
+the doublet filter, so I remove them manually bellow.
+
+
+## Filter cells with high exp
+```{r}
+#select cells to keep
+selected_Count <- WhichCells(filt.SO, expression = nCount_RNA < 25000)
+#and subset to only keep those cells
+filt.SO <- subset(filt.SO, cells = selected_Count)
+rm(selected_Count)
+dim(filt.SO)
+```
+### Plot QCs again
+#### Violins
+Since this one is exported for the manuscript I make some effort with aesthetics
+Update: this plot is not used in the manuscript. Instead I use the plot produced 
+from the script titled pilot3_&SmrtSeq_QCViolins.Rmd which reads the output RDD 
+file from this script and the equivalent output RDD from the script
+01_1st6samps_QC_general.Rmd
+```{r}
+# Create violin plots with x-axis as `orig.ident` and colors by `type`
+P12 <- c(feats, "S.Score", "G2M.Score") %>%
+  lapply(function(feature) {
+    VlnPlot(filt.SO, features = feature, 
+          group.by = "orig.ident",  # X-axis: Samples
+          split.by = "type",        # Color by `type`
+          cols = c("#008080", "#ffa600"),
+          pt.size = 0) + 
+      theme_gray() +
+    labs(y = c("nCount_RNA"   = "n transcripts",
+               "nFeature_RNA" = "n genes",
+               "percent.mt"   = "% mitochondrial",
+               "percent.rb"   = "% ribosomal",
+               "S.Score"      = "S-phase",
+               "G2M.Score"    = TeX("$G_{2}$- and M-phase"))[[feature]],
+         fill = "Sorted") +
+    theme(plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+          axis.text.y = element_text(size = 5, angle = 45),
+          axis.title.y = element_text(size = 8),
+          
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          
+          legend.text = element_text(size = 5),
+          legend.key.size = unit(2.5, "mm"),
+          legend.title = element_text(size = 8),
+          
+          plot.title = element_blank())
+  }) %>% wrap_plots(ncol = 3) + 
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+P12
+#ggsave(filename = paste0(path, "07_10XResults/pilot3_Merged_Output/P12.svg"), 
+#       plot = P12, height = 57.000, width = 173.417, units = "mm")
+##ggsave(filename = paste0(path, "07_10XResults/pilot3_Merged_Output/P12.svg"),
+##      plot = P12, height = 56.750, width = 83.41668, units = "mm")
+```
+
+##### Test QCs
+```{r}
+print("nCount_RNA______________________________________________")
+lm(data = filt.SO@meta.data, nCount_RNA ~ orig.ident) %>% aov() %>% TukeyHSD()
+print("nFeature_RNA____________________________________________")
+lm(data = filt.SO@meta.data, nFeature_RNA ~ orig.ident) %>% aov() %>% TukeyHSD()
+print("percent.mt______________________________________________")
+lm(data = filt.SO@meta.data, percent.mt ~ orig.ident) %>% aov() %>% TukeyHSD()
+print("percent.rb______________________________________________")
+lm(data = filt.SO@meta.data, percent.rb ~ orig.ident) %>% aov() %>% TukeyHSD()
+print("S.Score_________________________________________________")
+lm(data = filt.SO@meta.data, S.Score ~ orig.ident) %>% aov() %>% TukeyHSD()
+print("G2M.Score_______________________________________________")
+lm(data = filt.SO@meta.data, G2M.Score ~ orig.ident) %>% aov() %>% TukeyHSD()
+```
+
+
+#### Scatter
+```{r}
+P13 <- list(FeatureScatter(filt.SO, "nCount_RNA", "nFeature_RNA", 
+                           group.by = "orig.ident", pt.size = .1),
+            FeatureScatter(filt.SO, "nCount_RNA", "percent.mt", 
+                           group.by = "orig.ident", pt.size = .1),
+            FeatureScatter(filt.SO, "nCount_RNA", "percent.rb", 
+                           group.by = "orig.ident", pt.size = .1))
+P13 <- wrap_plots(P13, ncol = 2) + plot_layout(guides = "collect")
+P13
+```
+
+# Check QCs in reduced dims 
+Check that QCs don't distribute unevenly in reduced expression spaces.
+
+## Dimensionality reduction
+```{r}
+#Reset default assay to the raw RNA counts
+DefaultAssay(filt.SO) <- "RNA"
+
+# Normalize, transform and select variable features
+filt.SO <- SCTransform(filt.SO,                 
+                       new.assay.name = "filt_SCT_Reg",       
+                       vars.to.regress =c("percent.mt", "G2M.Score", "S.Score"),
+                       method = "glmGamPoi",            
+                       variable.features.n = 3000) #3000 is default
+#top20 <- head(VariableFeatures(filt.SO), 20)
+#LabelPoints(plot = VariableFeaturePlot(filt.SO),
+#            points = top20, repel = TRUE)
+
+#Reduce dimensions
+filt.SO <- RunPCA(filt.SO)
+#VizDimLoadings(filt.SO, dims = 1:5, reduction = "pca", ncol = 5, balanced = T)
+#ElbowPlot(filt.SO, reduction = "pca", ndims = 50)
+
+filt.SO <- RunTSNE(filt.SO, reduction = "pca", dims = 1:10)
+filt.SO <- RunUMAP(filt.SO, reduction = "pca", dims = 1:10)
+filt.SO <- RunUMAP(filt.SO, reduction = "pca", dims = 1:10,
+                   reduction.name = "umap_8d", n.components = 8)
+```
+
+## Plot 
+### In PCA
+#### Samples
+To increse visibility I change the order of the samples.
+```{r}
+P14 <- wrap_plots(DimPlot(filt.SO, reduction = "pca", group.by = "orig.ident", 
+                          dims = 1:2, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  DimPlot(filt.SO, reduction = "pca", group.by = "orig.ident", 
+                          dims = 3:4, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  DimPlot(filt.SO, reduction = "pca", group.by = "orig.ident", 
+                          dims = 5:6, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  DimPlot(filt.SO, reduction = "pca", group.by = "orig.ident",
+                          dims = 7:8, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  ncol = 2) + plot_layout(guides = "collect")  
+P14
+```
+
+#### QCs
+```{r}
+P15 <- FeaturePlot(filt.SO, reduction = "pca", 
+                   features = c(feats, "G2M.Score", "S.Score"),
+                   pt.size = .1, alpha = .5)
+P15
+```
+
+### In tSNE
+#### Sample
+```{r}
+P16 <- DimPlot(filt.SO, reduction = "tsne", group.by = "orig.ident", 
+                          dims = 1:2, alpha = .5, pt.size = .1)
+P16
+```
+
+#### QCs
+```{r}
+P17 <- FeaturePlot(filt.SO, reduction = "tsne", 
+                   features = c(feats, "G2M.Score", "S.Score"),
+                   pt.size = .5, alpha = .5)
+P17
+```
+
+### In 2d UMAPs
+#### Sample
+```{r}
+P18 <- DimPlot(filt.SO, reduction = "umap", group.by = "orig.ident", 
+                          dims = 1:2, alpha = .5, pt.size = .1)
+P18
+```
+
+#### QCs
+```{r}
+P19 <- FeaturePlot(filt.SO, reduction = "umap", 
+                   features = c(feats, "G2M.Score", "S.Score"),
+                   pt.size = .1, alpha = .5)
+P19
+```
+
+
+## In 8d UMAPs
+```{r}
+P20 <- wrap_plots(DimPlot(filt.SO, reduction = "umap_8d", group.by = "orig.ident", 
+                          dims = 1:2, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  DimPlot(filt.SO, reduction = "umap_8d", group.by = "orig.ident", 
+                          dims = 3:4, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  DimPlot(filt.SO, reduction = "umap_8d", group.by = "orig.ident", 
+                          dims = 5:6, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  DimPlot(filt.SO, reduction = "umap_8d", group.by = "orig.ident", 
+                          dims = 7:8, alpha = .5, pt.size = .1, 
+                          order = c("Pmur_82", "Pmur_84", "Pmur_85"),
+                          cols = c("#619CFF", "#00BA38", "#F8766D")),
+                  ncol = 2) + plot_layout(guides = "collect")
+P20
+```
+
+#Check QCs in clusters
+## Calculate new clusters
+```{r}
+#Cluster
+filt.SO <- FindNeighbors(filt.SO, dims = 1:10)
+filt.SO <- FindClusters(filt.SO)
+```
+
+## Plot clusters in 2d UMAP
+```{r}
+P21 <- DimPlot(filt.SO, reduction = "umap", group.by = "seurat_clusters", 
+               label = TRUE, dims = 1:2, alpha = .5, pt.size = .1)
+P21
+```
+
+## Plot QCs in cluster violins
+```{r}
+# Create a VlnPlot for each feature
+P22 <- VlnPlot(filt.SO, features = c(feats, "G2M.Score", "S.Score"), 
+               group.by = "seurat_clusters",
+               pt.size = 0)
+P22
+```
+
+# Save data
+Save RDS to continue with the second half of the analysis in a separate script
+```{r}
+#saveRDS(filt.SO, paste0(path, 
+#                        "06_10XAnalysis/pilot3_Merged_output_", 
+#                        Sys.Date(),
+#                        ".Rds"))
+filt.SO
+```
+
+# Save plots
+```{r}
+plot.list <- list(P01, P02, P03, P04, P05, 
+                  P06, P07, P08, P09, P10, 
+                  P11, P12, P13, P14, P15, 
+                  P16, P17, P18, P19, P20, 
+                  P21, P22)
+  
+names(plot.list) <- c("P01", "P02", "P03", "P04", "P05", 
+                      "P06", "P07", "P08", "P09", "P10", 
+                      "P11", "P12", "P13", "P14", "P15", 
+                      "P16", "P17", "P18", "P19", "P20", 
+                      "P21", "P22")
+
+#for (i in 1:length(plot.list)){
+#  #ggsave(plot = plot.list[[i]], 
+#  #       filename = paste0(path, "07_10XResults/pilot3_Merged_Output/", 
+#  #                        names(plot.list)[i], ".svg"))
+#  ggsave(plot = plot.list[[i]], 
+#         filename = paste0(path, "07_10XResults/pilot3_Merged_Output/", 
+#                           names(plot.list)[i], ".png"))
+#}
+
+#saveRDS(plot.list, paste0(path, 
+#                        "07_10XResults/pilot3_Merged_Output/plot.list_", 
+#                        Sys.Date(),
+#                        ".Rds"))
+
+#ggsave(filename = paste0(path, "07_10XResults/pilot3_Merged_Output/P12.svg"),
+#      plot = P12, height = 56.750, width = 83.41668, units = "mm")
+
+```
+
+
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+```
+
