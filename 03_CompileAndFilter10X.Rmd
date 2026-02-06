@@ -31,17 +31,17 @@ path <- "~/WorkDirs/PmurNCCPilot_10X_rerun/"
 ```{r}
 #Load data
 Pmur_82.SO <- Seurat::Read10X_h5(filename = paste0(path,
-                   "02_Analysis/10X_21_082/outs/filtered_feature_bc_matrix.h5"),
+                   "01_Data/10X_21_082_P22202_8007_filtered_feature_bc_matrix.h5"),
                     use.names = T) %>%
   CreateSeuratObject(project = "Pmur_82")
 
 Pmur_84.SO <- Seurat::Read10X_h5(filename = paste0(path, 
-                   "02_Analysis/10X_21_084/outs/filtered_feature_bc_matrix.h5"),
+                   "01_Data/10X_21_084_P22202_8008_filtered_feature_bc_matrix.h5"),
                     use.names = T) %>%
   CreateSeuratObject(project = "Pmur_84")
 
 Pmur_85.SO <- Seurat::Read10X_h5(filename = paste0(path, 
-                   "02_Analysis/10X_21_085/outs/filtered_feature_bc_matrix.h5"),
+                   "01_Data/10X_21_085_P22202_8009_filtered_feature_bc_matrix.h5"),
                     use.names = T) %>%
   CreateSeuratObject(project = "Pmur_85")
 
