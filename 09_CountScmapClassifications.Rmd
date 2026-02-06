@@ -1,0 +1,173 @@
+---
+title: "CountCellsInCao"
+author: "Robin Pranter"
+date: "2025-04-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+options(future.globals.maxSize = 120000 * 1024^2)
+Sys.setenv(R_MAX_VSIZE = "120Gb")
+
+#start_time <- Sys.time()
+rm(list = ls()); gc()
+path = "~/WorkDirs/PmurNCCPilot_10X_rerun/"
+
+library(Seurat, lib.loc = "/usr/local/lib/R/site-library")
+library(ggplot2, lib.loc = "/usr/local/lib/R/site-library")
+library(tidyr, lib.loc = "/usr/local/lib/R/site-library")
+library(dplyr, lib.loc = "/usr/local/lib/R/site-library")
+```
+
+
+# Read count table
+```{r}
+#Read the subsampled dataset. 
+#The full one is so large that it does not work well with scmap
+Cao.SO <- readRDS(paste0(path,
+                      "01_Data/CaoData/gene_count_cleaned.RDS")) %>% 
+  CreateSeuratObject(project = "Cao2019")
+```
+
+# Read annotations
+```{r}
+#Read data
+Cao_ann <- read.csv(paste0(path, "01_Data/CaoData/", 
+                        "cell_annotate.csv"))[ , c("sample", "Main_cell_type")]
+#Name rows by sample
+rownames(Cao_ann) <- Cao_ann$sample
+
+#Subset only the cells that are in both the annotation and the count table
+#Do this in both files.
+Cao_ann <- subset(Cao_ann, sample %in% colnames(Cao.SO))
+gc()
+```
+
+# Reclassify cell types
+```{r}
+tempvec <- Cao_ann$Main_cell_type
+tempvec[tempvec=="Intermediate Mesoderm"]         <- "Not NCC"
+tempvec[tempvec=="Lens"]                          <- "Not NCC"
+tempvec[tempvec=="Early mesenchyme"]              <- "Possible NCC"
+tempvec[tempvec=="Limb mesenchyme"]               <- "Not NCC"
+tempvec[tempvec=="Neural Tube"]                   <- "Possible NCC"
+tempvec[tempvec=="Schwann cell precursor"]        <- "NCC"
+tempvec[tempvec=="Chondrocytes & osteoblasts"]    <- "Possible NCC"
+tempvec[tempvec=="Chondroctye progenitors"]       <- "Possible NCC"
+tempvec[tempvec=="Premature oligodendrocyte"]     <- "Not NCC"
+tempvec[tempvec=="Cholinergic neurons"]           <- "Possible NCC"
+tempvec[tempvec=="Oligodendrocyte Progenitors"]   <- "Not NCC"
+tempvec[tempvec=="Cardiac muscle lineages"]       <- "Possible NCC"
+tempvec[tempvec=="Jaw and tooth progenitors"]     <- "NCC"
+tempvec[tempvec=="Postmitotic premature neurons"] <- "Possible NCC"
+tempvec[tempvec=="Radial glia"]                   <- "Not NCC"
+tempvec[tempvec=="Isthmic organizer cells"]       <- "Not NCC"
+tempvec[tempvec=="Definitive erythroid lineage"]  <- "Not NCC"
+tempvec[tempvec=="Sensory neurons"]               <- "Possible NCC"
+tempvec[tempvec=="Notochord cells"]               <- "Not NCC"
+tempvec[tempvec=="Megakaryocytes"]                <- "Not NCC"
+tempvec[tempvec=="Endothelial cells"]             <- "Not NCC"
+tempvec[tempvec=="White blood cells"]             <- "Not NCC"
+tempvec[tempvec=="Melanocytes"]                   <- "NCC"
+tempvec[tempvec=="Epithelial cells"]              <- "Not NCC"
+tempvec[tempvec=="Inhibitory neurons"]            <- "Possible NCC"
+tempvec[tempvec=="Neural progenitor cells"]       <- "Possible NCC"
+tempvec[tempvec=="Connective tissue progenitors"] <- "Possible NCC"
+tempvec[tempvec=="Ependymal cell"]                <- "Not NCC"
+tempvec[tempvec=="Myocytes"]                      <- "Possible NCC"
+tempvec[tempvec=="Excitatory neurons"]            <- "Possible NCC"
+tempvec[tempvec=="Primitive erythroid lineage"]   <- "Not NCC"
+tempvec[tempvec=="Inhibitory interneurons"]       <- "Not NCC"
+tempvec[tempvec=="Stromal cells"]                 <- "Possible NCC"
+tempvec[tempvec=="Inhibitory neuron progenitors"] <- "Possible NCC"
+tempvec[tempvec=="Granule neurons"]               <- "Not NCC"
+tempvec[tempvec=="Osteoblasts"]                   <- "Possible NCC"
+tempvec[tempvec=="unassigned"]                    <- "unassigned"
+tempvec[tempvec=="Hepatocytes"]                   <- "Not NCC"
+Cao_ann$renamed <- tempvec
+rm(tempvec)
+```
+
+
+## Count cells
+```{r}
+(Cao_ann$renamed == "NCC") %>% sum()
+(Cao_ann$renamed == "Not NCC") %>% sum()
+(Cao_ann$renamed == "Possible NCC") %>% sum()
+(Cao_ann$renamed == "unassigned") %>% sum()
+nrow(Cao_ann)
+```
+# Plot the proportions
+This takes the proportions of cells Categorized as "NCC", "Not NCC", "Possible NCC",
+and "unassigned" and plots a barplot. The numbers for the Cao dataset cames from
+above. The other numbers come from scmap projections of the respective dataset onto 
+the Cao dataset.
+```{r}
+# Create the data frame
+P01 <- data.frame(
+  Sample = c("Strict", "Soldatov", "Lenient", "Unsort", "Cao"),
+  Definitive = c(0.12,       0.04,      0.10,     0.12,  0.08),
+  Possible   = c(0.60,       0.92,      0.51,     0.39,  0.54),
+  Not        = c(0.20,       0.03,      0.36,     0.46,  0.38),
+  unassigned = c(0.08,       0.01,      0.03,     0.03,  0.00)) %>% 
+  # Reshape to long format
+  pivot_longer(cols = -Sample, names_to = "Category", values_to = "Value") %>%
+  #Rearrange levels
+  mutate(Sample = factor(Sample, levels = c("Cao", "Unsort", "Lenient", 
+                                            "Strict", "Soldatov")),
+         Category = factor(Category, levels = c("unassigned", "Not", "Possible", 
+                                                "Definitive"))) %>%
+  # Create the plot
+  ggplot(aes(x = Sample, y = Value, fill = Category)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = c("Definitive" = "#00d500ff", 
+                               "Possible"   = "#58975aff",
+                               "Not"        = "#7f7f81ff", 
+                               "unassigned" = "lightgrey")) +
+  labs(title = "Proportions of renamed celltype projections",
+       y = "Proportion",
+       x = "Sample") +
+  theme(plot.title = element_text(size = 8),
+        #Axes
+        axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 5),
+        axis.title.y = element_text(size = 8),
+        axis.title.x = element_text(size = 8, vjust = 0),
+        axis.text.y = element_text(angle = 45),
+        axis.ticks.y = element_blank(),
+        #Legend
+        legend.text  = element_text(size = 5),
+        legend.title = element_blank(),#text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        #legend.position = "none",
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA))
+P01
+ggsave(paste0(path, "03_Results/PropsRenamedProjections.png"),
+       P01, 
+       #height = 167.625,
+       height = 88.417,
+       width = 88.417, units = "mm")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

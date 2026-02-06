@@ -1,0 +1,364 @@
+---
+title: "Untitled"
+author: "Robin Pranter"
+date: "2025-01-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+```{r}
+options(future.globals.maxSize = 120000 * 1024^2) # Change this to fit your 
+Sys.setenv(R_MAX_VSIZE = "120Gb")                 # computer
+
+rm(list=ls());gc()
+start_time <- Sys.time()
+
+library(dplyr, lib.loc = "/usr/local/lib/R/site-library")   # Change this to
+library(Seurat, lib.loc = "/usr/local/lib/R/site-library")  # mach the location
+library(ggplot2, lib.loc = "/usr/local/lib/R/site-library") # of your libraries
+library(reshape2, lib.loc = "/usr/local/lib/R/site-library")
+library(ggridges, lib.loc = "/usr/local/lib/R/site-library")
+library(ggrastr, lib.loc = "/usr/local/lib/R/site-library")
+
+path <- "~/WorkDirs/PmurNCCPilot_10X_rerun/"
+```
+
+# Read Soldatov data
+```{r}
+#Read count tables
+Sol_1 <- read.table(paste0(path, "01_Data/SoldatovData/",
+                           "E10.5_post-otic_Sox10_counts.txt"), sep = " ")
+Sol_1$gene <- rownames(Sol_1)
+Sol_2 <- read.table(paste0(path, "01_Data/SoldatovData/",
+                           "E10.5_tail_Wnt1_counts.txt"), sep = " ")
+Sol_2$gene <- rownames(Sol_2)
+Sol_3 <- read.table(paste0(path, "01_Data/SoldatovData/",
+                           "E10.5_trunk_Wnt1_counts.txt"), sep = " ")
+Sol_3$gene <- rownames(Sol_3)
+Sol_4 <- read.table(paste0(path, "01_Data/SoldatovData/", 
+                           "E8.5_whole_embryo_Wnt1_counts.txt"), sep = " ")
+Sol_4$gene <- rownames(Sol_4)
+Sol_5 <- read.table(paste0(path, "01_Data/SoldatovData/",
+                           "E9.5_anterior_Sox10_counts.txt"), sep = " ")
+Sol_5$gene <- rownames(Sol_5)
+Sol_6 <- read.table(paste0(path, "01_Data/SoldatovData/",
+                           "E9.5_posterior_Sox10_counts.txt"), sep = " ")
+Sol_6$gene <- rownames(Sol_6)
+Sol_7 <- read.table(paste0(path, "01_Data/SoldatovData/",
+                           "E9.5_trunk_Wnt1_counts.txt"), sep = " ")
+Sol_7$gene <- rownames(Sol_7)
+
+#Merge tables into one
+Sol <- merge(Sol_1, Sol_2, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_3, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_4, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_5, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_6, by = "gene", all.x = TRUE, all.y = TRUE) %>%
+  merge(Sol_7, by = "gene", all.x = TRUE, all.y = TRUE)
+#Remove old tables
+rm(Sol_1, Sol_2, Sol_3, Sol_4, Sol_5, Sol_6, Sol_7); gc()
+
+#Make nice
+Sol[,-1] <- lapply(Sol[,-1], as.numeric)
+Sol <- Sol[order(colnames(Sol))]
+
+#Use gene names for rownames and remove gene column
+rownames(Sol) <- Sol$gene
+Sol <- dplyr::select(Sol, -c("gene"))
+gc()
+```
+
+```{r}
+# Extract the row and convert to long format
+rel_exp.df <- data.frame(Sox10_PM = as.numeric(Sol["Sox10", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Sox9_PM = as.numeric(Sol["Sox9", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Snai1_PM = as.numeric(Sol["Snai1", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Snai2_PM = as.numeric(Sol["Snai2", ]/
+                                                    (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                         Tfap2a_PM = as.numeric(Sol["Tfap2a", ]/
+                                                   (colSums(Sol, na.rm = TRUE)/
+                                                       1e+06)),
+                            Dataset = "Soldatov",
+                            Sorted = "Sox10")
+rel_exp.df[is.na(rel_exp.df)] <- 0 # Some genes are not present in the count 
+#rm(Sol); gc()                     # table, introducing NAs. These are converted
+                                   # to 0s here
+```
+
+# Read Cao data
+```{r}
+#Read data
+rel_exp.df <- readRDS(paste0(path, 
+                      "01_Data/CaoData/gene_count_cleaned.RDS")) %>%
+  CreateSeuratObject(project = "Cao2019") %>%
+  FetchData(vars = c("ENSMUSG00000033006.9",  #Sox10
+                     "ENSMUSG00000000567.5",  #Sox9
+                     "ENSMUSG00000042821.7",  #Snai1
+                     "ENSMUSG00000022676.6",  #Snai2
+                     "ENSMUSG00000021359.15", #Tfap2a
+                     "nCount_RNA"), layer = "counts") %>%
+  mutate(Sox10_PM  = ENSMUSG00000033006.9  / (nCount_RNA / 1e+06),
+         Sox9_PM   = ENSMUSG00000000567.5  / (nCount_RNA / 1e+06),
+         Snai1_PM  = ENSMUSG00000042821.7  / (nCount_RNA / 1e+06),
+         Snai2_PM  = ENSMUSG00000022676.6  / (nCount_RNA / 1e+06),
+         Tfap2a_PM = ENSMUSG00000021359.15 / (nCount_RNA / 1e+06),
+         Dataset = "Cao",
+         Sorted = "Whole embryo") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+gc()
+```
+
+# Read 10X data
+```{r}
+filename10X <- list.files(paste0(path, "02_Analysis/"), 
+           pattern = "03_CompileAndFilter10X_out_")
+if (length(filename10X) > 1) {
+  print(paste0("You have two files matching the pattern.", 
+               "Choose one to read and remove the other from the directory."))
+  print(filename10X)
+}
+```
+
+```{r}
+rel_exp.df <- readRDS(paste0(path, "02_Analysis/", filename10X)) %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1", 
+                     "SNAI2",
+                     "TFAP2A",
+                     "nCount_RNA", 
+                     "orig.ident"), layer = "counts") %>%
+  subset(orig.ident == "Pmur_82") %>%
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e+06),
+         Sox9_PM  = SOX9 / (nCount_RNA / 1e+06),
+         Snai1_PM = SNAI1 / (nCount_RNA / 1e+06),
+         Snai2_PM = SNAI2 / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Leniently sorted",
+         Sorted = "HNK-1 top 15%") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+
+rel_exp.df <- readRDS(paste0(path, "02_Analysis/", filename10X)) %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1", 
+                     "SNAI2",
+                     "TFAP2A",
+                     "nCount_RNA", 
+                     "orig.ident"), layer = "counts") %>%
+  subset(orig.ident == "Pmur_84") %>% 
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e+06),
+         Sox9_PM  = SOX9 / (nCount_RNA / 1e+06),
+         Snai1_PM = SNAI1 / (nCount_RNA / 1e+06),
+         Snai2_PM = SNAI2 / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Unsorted",
+         Sorted = "Whole embryo") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+
+rel_exp.df <- readRDS(paste0(path, "02_Analysis/", filename10X)) %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1",
+                     "SNAI2",
+                     "TFAP2A",
+                     "nCount_RNA", 
+                     "orig.ident"), layer = "counts") %>%
+  subset(orig.ident == "Pmur_85") %>% 
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e+06),
+         Sox9_PM  = SOX9 / (nCount_RNA / 1e+06),
+         Snai1_PM = SNAI1 / (nCount_RNA / 1e+06),
+         Snai2_PM = SNAI2 / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Unsorted",
+         Sorted = "Whole embryo") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+rm(filename10X); gc()
+```
+Obs that the FoxD3 data is from normalized data and not counts. Be careful with
+the interpretation.
+
+# Read smart-seq data
+```{r}
+filenameSmrtS <- list.files(paste0(path, "02_Analysis/"), 
+           pattern = "02_FilterSmrtS_output_")
+if (length(filenameSmrtS) > 1) {
+  print(paste0("You have two files matching the pattern.", 
+               "Choose one to read and remove the other from the directory."))
+  print(filenameSmrtS)
+}
+```
+
+```{r}
+rel_exp.df <- readRDS(paste0(path, "02_Analysis/", filenameSmrtS)) %>%
+  subset(orig.ident == "Plate_09") %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1",
+                     "SNAI2",
+                     "TFAP2A",
+                     "nCount_RNA"), layer = "counts") %>%
+  mutate(Sox10_PM  = SOX10  / (nCount_RNA / 1e+06),
+         Sox9_PM   = SOX9   / (nCount_RNA / 1e+06),
+         Snai1_PM  = SNAI1  / (nCount_RNA / 1e+06),
+         Snai2_PM  = SNAI2  / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Strictly sorted",
+         Sorted = "HNK-1 top 5%") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+
+rel_exp.df <- readRDS(paste0(path, "02_Analysis/", filenameSmrtS)) %>%
+  subset(orig.ident == "Plate_11") %>%
+  FetchData(vars = c("SOX10",
+                     "SOX9",
+                     "SNAI1",
+                     "SNAI2",
+                     "TFAP2A",
+                     "nCount_RNA"), layer = "counts") %>%
+  mutate(Sox10_PM  = SOX10  / (nCount_RNA / 1e+06),
+         Sox9_PM   = SOX9   / (nCount_RNA / 1e+06),
+         Snai1_PM  = SNAI1  / (nCount_RNA / 1e+06),
+         Snai2_PM  = SNAI2  / (nCount_RNA / 1e+06),
+         Tfap2a_PM = TFAP2A / (nCount_RNA / 1e+06),
+         Dataset = "Strictly sorted",
+         Sorted = "HNK-1 top 5%") %>%
+  select(c("Sox10_PM", "Sox9_PM", "Snai1_PM", "Snai2_PM", 
+           "Tfap2a_PM", "Dataset", "Sorted")) %>%
+  rbind(rel_exp.df)
+rm(filenameSmrtS); gc()
+```
+
+# Plot all data
+## Calc summaries for plotting
+```{r}
+#Compute the some summaries to be used for plotting
+summary_stats <- rel_exp.df %>%
+  group_by(Dataset, Sorted) %>%
+  summarize(#Sample size
+            n = n(),
+            n_char = paste0("n = ", n()),
+            #Sox10
+            n_none0_Sox10 = sum(Sox10_PM > 0, na.rm =TRUE),
+            perc_non0_Sox10 = (sum(Sox10_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Sox10_char = paste0("% non-zero cells = ", 
+                                       (sum(Sox10_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #Sox9
+            n_none0_Sox9 = sum(Sox9_PM > 0, na.rm =TRUE),
+            perc_non0_Sox9 = (sum(Sox9_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Sox9_char = paste0("% non-zero cells = ", 
+                                       (sum(Sox9_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #Snai1
+            n_none0_Snai1 = sum(Snai1_PM > 0, na.rm =TRUE),
+            perc_non0_Snai1 = (sum(Snai1_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Snai1_char = paste0("% non-zero cells = ", 
+                                       (sum(Snai1_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #Snai2
+            n_none0_Snai2 = sum(Snai2_PM > 0, na.rm =TRUE),
+            perc_non0_Snai2 = (sum(Snai2_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Snai2_char = paste0("% non-zero cells = ", 
+                                       (sum(Snai2_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100),
+            #TFAP2A
+            n_none0_Tfap2a = sum(Tfap2a_PM > 0, na.rm =TRUE),
+            perc_non0_Tfap2a = (sum(Tfap2a_PM > 0, na.rm =TRUE)/n())*100,
+            perc_non0_Tfap2a_char = paste0("% non-zero cells = ", 
+                                       (sum(Tfap2a_PM > 0, na.rm =TRUE)/n()) %>%
+                                         round(3)*100)
+            )
+
+# Reorder the Dataset factor levels based on perc_non0_Sox10
+rel_exp.df$Dataset <- factor(rel_exp.df$Dataset, 
+          levels = summary_stats$Dataset[order(summary_stats$perc_non0_Sox10)])
+summary_stats
+```
+
+## Sox10
+```{r}
+P1 <- ggplot(rel_exp.df, aes(y = Dataset, x = Sox10_PM, 
+                             fill = Sorted)) +
+  ggrastr::rasterise(dpi = 1600,
+                     layers = c("Point"),
+                     input = geom_density_ridges(#bandwidth = .3,
+                                    jittered_points = TRUE,
+                                    position = position_raincloud(ygap = .02, 
+                                                                  height = .2),
+                                    point_shape = 21,
+                                    point_alpha = .2,
+                                    point_size = 1,
+                                    alpha = 1,
+                                    rel_min_height = 0.001,
+                                    scale = .6)) +
+  scale_x_continuous(trans = "log1p",
+                     limits = c(0, 12050)) +
+  # Set colors
+  scale_fill_manual(values = c("HNK-1 top 5%"  = "#64EC09",
+                               "Sox10"         = "#00bfc4b2",
+                               "HNK-1 top 15%" = "#53AC90",
+                               "Whole embryo"  = "#BDBDBD")) +
+  #Add percentage non-zero cells and sample size to each data set
+  geom_text(data = summary_stats,
+            aes(x = 100, y = Dataset, label = perc_non0_Sox10_char),
+            vjust = -3.5, size = 8*.35) + # *.35 translates pt to mm
+  geom_text(data = summary_stats,
+            aes(x = 6000, y = Dataset, label = n_char),
+            vjust = -3.5, size = 8*.35) + # *.35 translates pt to mm
+  
+  #Adjust theme 
+  theme(#plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        #Axes
+        axis.text  = element_text(angle = 45, vjust = 1, hjust = 1, size = 8),
+        axis.title.y = element_text(size = 11),
+        axis.title.x = element_text(size = 11, vjust = 0),
+        axis.text.y = element_text(angle = 45),
+        axis.ticks.y = element_blank(),
+        #Legend
+        legend.text  = element_text(size = 8),
+        legend.title = element_text(size = 11),
+        legend.key.size = unit(3, "mm"),
+        legend.position = "none",
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.grid.major = element_line(color = "gray"),
+        panel.grid.minor = element_line(color = "gray"),
+        panel.border = element_rect(colour = "black", fill = NA)) +
+  labs(x = "Sox10 counts per 1M total counts",
+       y = "Frequency of cells")
+P1
+
+ggsave(paste0(path, "03_Results/relExpSox10.svg"),
+       P1, height = 160, width = 89, units = "mm")
+```
+
+Aquivalent plots could be produced for other NCC markers. The DF here contains four more genes. These tell the same story as Sox10 and so are not shown in the paper. By adjusting the code you could plot even more genes. 
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+sessionInfo()
+```

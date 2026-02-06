@@ -1,0 +1,680 @@
+---
+title: ''
+output: html_document
+date: "2025-12-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up
+```{r}
+options(future.globals.maxSize = 120000 * 1024^2) # Change this to fit your 
+Sys.setenv(R_MAX_VSIZE = "120Gb")                 # computer
+
+rm(list=ls());gc()
+start_time <- Sys.time()
+
+library(Seurat, lib.loc = "/usr/local/lib/R/site-library")    #Change these to
+library(glmGamPoi, lib.loc = "/usr/local/lib/R/site-library") #mach the location
+library(dplyr, lib.loc = "/usr/local/lib/R/site-library")     #of your libraries
+library(ggplot2, lib.loc = "/usr/local/lib/R/site-library") 
+library(patchwork, lib.loc = "/usr/local/lib/R/site-library")
+library(latex2exp, lib.loc = "/home/pranter/R/x86_64-pc-linux-gnu-library/4.5")
+library(ggrepel, lib.loc = "/usr/local/lib/R/site-library")
+library(ggbreak, lib.loc = "/home/pranter/R/x86_64-pc-linux-gnu-library/4.5")
+library(ggridges, lib.loc = "/usr/local/lib/R/site-library")
+library(stringr, lib.loc = "/usr/local/lib/R/site-library")
+
+path <- "~/WorkDirs/PmurNCCPilot_10X_rerun/"
+```
+
+# Read filtered 10X data
+```{r}
+filename <- list.files(paste0(path, "02_Analysis/"), 
+           pattern = "03_CompileAndFilter10X_out_")
+if (length(filename) == 1) {
+  TenX.SO <- readRDS(file=paste0(path, "02_Analysis/", filename))
+} else {
+  print(paste0("You have two files matching the pattern.", 
+               "Choose one to read and remove the other from the directory."))
+  print(filename)
+}
+rm(filename)
+TenX.SO
+```
+
+# Read filtered SmartSeq data
+```{r}
+filename <- list.files(paste0(path,"02_Analysis/"),
+           pattern = "02_FilterSmrtS_output_")
+if (length(filename) == 1) {
+  SmrtS.SO <- readRDS(file = paste0(path, "02_Analysis/", filename))
+} else {
+  print(paste0("You have two files matching the pattern. ", 
+               "Choose one to read and remove the other from the directory."))
+  print(filename)
+}
+rm(filename)
+SmrtS.SO
+```
+
+# Merge objects
+```{r}
+# Select metadata columns
+met.cols <- c("orig.ident", "type", "nCount_RNA","nFeature_RNA", 
+              "percent.mt", "percent.rb")
+SmrtS.SO$type <- "Strictly sorted"
+SmrtS.SO@meta.data <- SmrtS.SO@meta.data %>% select(all_of(met.cols))
+TenX.SO@meta.data <- TenX.SO@meta.data %>% select(all_of(met.cols))
+rm(met.cols)
+
+#Restor seurat objects to non-normalized form
+DefaultAssay(SmrtS.SO) <- "RNA"
+SmrtS.SO <- DietSeurat(object = SmrtS.SO,
+                layers = "counts",
+                assays = "RNA")
+DefaultAssay(TenX.SO) <- "RNA"
+TenX.SO <- DietSeurat(object = TenX.SO,
+                layers = "counts",
+                assays = "RNA")
+
+#Merge
+full.SO <- merge(TenX.SO, c(SmrtS.SO))
+full.SO[["RNA"]] <- JoinLayers(full.SO[["RNA"]])
+
+# Fix the type column in meta data (mostly for plotting)
+full.SO@meta.data$type <- factor(full.SO@meta.data$type, 
+                                 levels = c("Unsort", "Sorted", 
+                                            "Strictly sorted"))
+full.SO@meta.data <- full.SO@meta.data %>%
+  mutate(type = recode(type, 
+                       "Unsort" = "Unsorted",
+                       "Sorted" = "Leniently sorted"),
+         type.short = recode(type, 
+                             "Unsorted" = "U",
+                             "Leniently sorted" = "L",
+                             "Strictly sorted" = "S"))
+
+full.SO
+full.SO@meta.data %>% colnames()
+```
+
+# Basic stats
+```{r}
+full.SO@meta.data %>% 
+  group_by(type) %>% 
+  summarize(n = n(),
+            av_count = mean(nCount_RNA) %>% round(),
+            sd_count = sd(nCount_RNA) %>% round(),
+            av_genes = mean(nFeature_RNA) %>% round(),
+            sd_genes = sd(nFeature_RNA) %>% round()) %>%
+  t()
+```
+
+# Calc Cell Cycl
+```{r}
+# temporary normalisation for CC-scoring
+full.SO <- SCTransform(full.SO,
+                       assay = 'RNA',
+                       new.assay.name = 'temp_SCT',
+                       vars.to.regress = c('percent.mt'),
+                       vst.flavor = "v2",
+                       variable.features.n = 3000) #3000 is default
+# Load ortholog table
+Ortho.df <- read.csv(file=paste0(path, "01_Data/", 
+                            "Pmur1.0Human_OrthoTable_BioMartManDL20241206.txt"))
+# Save S and G2M markers in Pmur
+G2M.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                        cc.genes.updated.2019$g2m.genes, ]$Gene.name
+S.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                      cc.genes.updated.2019$s.genes, ]$Gene.name
+
+#Check that the markers are present in the data
+print(paste0(full.SO %>% Features() %in% G2M.genes %>% sum(), "/",
+             G2M.genes %>% length(), 
+             " G2M-markers are present in the data"))
+print(paste0(full.SO %>% Features() %in% S.genes %>% sum(), "/",
+             S.genes %>% length(), 
+             " S-markers are present in the data"))
+
+#Subset only the genes that are present
+G2M.genes <- G2M.genes[G2M.genes %in% Features(full.SO)]
+S.genes <- S.genes[S.genes %in% Features(full.SO)]
+# Predict cell cycle state (make sure to specify the "assay" parameter)
+full.SO <- CellCycleScoring(full.SO,
+                            s.features = S.genes,
+                            g2m.features = G2M.genes,
+                            assay = 'temp_SCT',
+                            set.ident = TRUE)
+rm(G2M.genes, S.genes); gc()
+```
+
+# Plot QCs
+```{r}
+PQC <- c("nCount_RNA", "nFeature_RNA", "percent.mt", "percent.rb") %>% 
+  lapply(function(feats){
+  ggplot(full.SO@meta.data, aes(x = type, y = .data[[feats]], fill = type)) + 
+      geom_violin() +
+      scale_fill_manual(values = c("Unsorted"          = "#BDBDBD",
+                                   "Leniently sorted"  = "#53AC90",
+                                   "Strictly sorted"   = "#64EC09")) +
+      labs(y = c("nCount_RNA"   = "n counts",
+                 "nFeature_RNA" = "n genes",
+                 "percent.mt"   = "% mitochondrial",
+                 "percent.rb"   = "% ribosomal")[feats], fill = "") +
+      theme_classic() + 
+      theme(plot.margin = margin(t=1.7, r=1, b=0, l=0.4, unit = "mm"),
+          axis.text.y = element_text(size = 8, angle = 45),
+          axis.title.y = element_text(size = 11),
+          
+          axis.text.x = element_blank(),
+          axis.title.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          
+          legend.text = element_text(size = 8),
+          legend.key.size = unit(3, "mm"),
+          legend.title = element_text(size = 11),
+          
+          plot.title = element_blank())
+  }) %>% 
+  wrap_plots(ncol = 4) + 
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+PQC
+ggsave(filename = paste0(path, "03_Results/QCPlot.svg"),
+      plot = PQC, height = 50, width = 180, units = "mm")
+```
+
+# Table for manuscript
+```{r}
+full.SO@meta.data %>% select("type", "nCount_RNA", "nFeature_RNA") %>% 
+  group_by(type) %>% 
+  summarize(n = n(),
+            av_count = mean(nCount_RNA) %>% round(),
+            sd_count = sd(nCount_RNA) %>% round(),
+            av_genes = mean(nFeature_RNA) %>% round(),
+            sd_genes = sd(nFeature_RNA) %>% round()) %>%
+  t()
+```
+
+# Standard processing
+## Without integration
+```{r}
+#DefaultAssay(full.SO) <- "RNA"
+#full.SO[["temp_SCT"]] <- NULL
+## Normalize
+#full.SO <- SCTransform(full.SO, 
+#                       assay = 'RNA',
+#                       new.assay.name = 'SCT',
+#                       vars.to.regress =c("percent.mt", "S.Score", "G2M.Score"),
+#                       vst.flavor = "v2",
+#                       variable.features.n = 3000)
+#
+## Inspect the normalization
+#cbind(Matrix::rowSums(full.SO[["RNA"]]$counts)[
+#                                        rownames(full.SO[["RNA"]]$counts) %in% 
+#                                          rownames(full.SO[["SCT"]]$data)],
+#             Matrix::rowSums(full.SO[["SCT"]]$data)) %>%
+#  as.data.frame() %>%
+#  dplyr::rename(raw = V1, norm = V2) %>%
+#  ggplot(aes(raw, norm)) +
+#  geom_point() +
+#  labs(title = "Normalized data vs raw counts (each dot is a gene)") +
+#  theme(text = element_text(size = 6))
+#
+## Inspect HVG selection
+#VariableFeaturePlot(full.SO, assay = "SCT") %>% 
+#  LabelPoints(points = VariableFeatures(full.SO, assay = "SCT") %>% head(20), 
+#              repel = TRUE,
+#              xnudge = 0, ynudge = 0, max.overlaps = 22) +
+#  theme(text = element_text(size = 6))
+#
+## Lin dim reduc
+#full.SO <- RunPCA(full.SO, assay = "SCT")
+#ElbowPlot(full.SO, reduction = "pca", ndims = 50)
+#
+#Non-lin dim reduc
+#full.SO <- RunUMAP(full.SO, dims = 1:20)#, spread = 0.4, min.dist = 0.4)
+#  # dims = 11 seems good judgeing by the elbowplot and PC-heatmaps 
+#  # Changing the min.dist dramatically changes the umap. This requires some 
+#  # optimaization. Come back to this later.
+#
+##Plot
+#DimPlot(full.SO, reduction = "umap", group.by = "type", 
+#        shuffle = TRUE, alpha = 0.5) + ggtitle("No integration")
+##DimPlot(full.SO, group.by = "orig.ident", shuffle = TRUE, alpha = 0.5,
+##        cells = Cells(subset(full.SO, subset = type.short == "L")))
+```
+
+## With integration
+See insturctions here: https://github.com/satijalab/seurat/issues/7542
+and here: https://satijalab.org/seurat/articles/seurat5_integration
+```{r}
+# Normalize each sample separately
+full.SO[["RNA"]] <- split(full.SO[["RNA"]], f = full.SO$orig.ident)
+DefaultAssay(full.SO) <- "RNA"
+full.SO <- SCTransform(full.SO,
+                       assay = "RNA",
+                       new.assay.name = "SCT_BySample",
+                       vars.to.regress =c("percent.mt", "G2M.Score", "S.Score"),
+                       vst.flavor = "v2",
+                       variable.features.n = 3000) %>%
+  # Calculate PCA
+  RunPCA(assay = "SCT_BySample", reduction.name = "pca_SCT_BySample") %>%
+  # Integrate data sets
+  IntegrateLayers(method = HarmonyIntegration,
+                  orig.reduction = "pca_SCT_BySample", 
+                  new.reduction = 'harmony',
+                  assay = "SCT_BySample",
+                  normalization.method = "SCT",
+                  verbose = FALSE) %>%
+  # Calc umap
+  RunUMAP(dims = 1:30, reduction = "harmony", reduction.name = "umap_harmony")
+```
+# Plot sort types in umap
+```{r}
+P01 <- DimPlot(full.SO, 
+               reduction = "umap_harmony", group.by = "type",
+               order = c("Strictly sorted", "Leniently sorted", "Unsorted"),
+               alpha = 0.5, stroke.size = 0, pt.size = 1) + 
+  scale_color_manual(values = c("Unsorted"          = "#BDBDBD",
+                                "Leniently sorted"  = "#53AC90",
+                                "Strictly sorted"   = "#64EC09")) + 
+  labs(y = "umap 2", x = "umap 1") +
+  theme(plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        axis.text.y = element_text(size = 8, angle = 45),
+        axis.title.y = element_text(size = 11),
+          
+        axis.text.x = element_text(size = 8, angle = 45),
+        axis.title.x = element_text(size = 11),
+
+        legend.text = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "inside",
+        
+        plot.title = element_blank())
+P01
+
+ggsave(paste0(path, "03_Results/UMAP_SortType.svg"),
+       P01, height = 89, width = 89, units = "mm")
+```
+
+# Plot marker exp in umap
+```{r}
+# First normalize across samples to correct for sequencing depth
+full.SO[["RNA"]] <- JoinLayers(full.SO[["RNA"]])
+full.SO <- SCTransform(full.SO,
+                       assay = "RNA",
+                       new.assay.name = "SCT",
+                       vars.to.regress =c("percent.mt", "G2M.Score", "S.Score"),
+                       vst.flavor = "v2",
+                       variable.features.n = 3000)
+
+# It also seems to work to do PrepSCTFindMarkers
+```
+
+```{r}
+# Then plor using FeaturePlot
+P02 <- FeaturePlot(full.SO, c("SOX10", "TFAP2A", 
+                              "SNAI2", "FOXD3"#, 
+                              #"PAX7", "SOX9", "TWIST1", "PAX3", "GAPDH"
+                              ),
+            order = TRUE, pt.size = 1, alpha = 0.5, keep.scale = "all") & 
+  NoAxes() &
+  theme(legend.key.size = unit(3, "mm"),
+        legend.text = element_text(size = 8))
+
+#Remove stroke arround points
+P02 <- lapply(P02, function(p) {
+  p$layers[[1]]$aes_params$stroke <- 0
+  old_title <- p$labels$title
+#Chance title font
+  p <- p + ggtitle(str_to_sentence(old_title)) +
+    theme(plot.title = element_text(face = "italic"))
+  p
+})
+
+#Tidy up
+P02 <- wrap_plots(P02, ncol = 2, guides = "collect") & 
+  FontSize(main = 11) + 
+  NoAxes()
+
+P02
+
+ggsave(paste0(path, "03_Results/UMAP_MrkrExp.svg"),
+       P02, height = 89, width = 89, units = "mm")
+```
+# Calc NCC-ness score
+```{r}
+full.SO <- AddModuleScore(object = full.SO, 
+                          features = list(c("PAX3", "PAX7", "FOXD3", "SOX10",
+                                            "SOX9", "WNT1", "TFAP2A", "SOX5",
+                                            "SNAI2", "ZIC1")), 
+                          name = "NCC_AMS",
+                          ctrl = 100)
+full.SO@meta.data %>% 
+  select(type, NCC_AMS1) %>% 
+  group_by(type) %>% 
+  summarize(avg_NCCAMS = median(NCC_AMS1)) %>% 
+  t()
+
+wilcox.test(x = subset(full.SO, subset = type == "Strictly sorted")$NCC_AMS1,
+            y = subset(full.SO, subset = type == "Leniently sorted")$NCC_AMS1)
+wilcox.test( x = subset(full.SO, subset = type == "Strictly sorted")$NCC_AMS1,
+             y = subset(full.SO, subset = type == "Unsorted")$NCC_AMS1)
+wilcox.test( x = subset(full.SO, subset = type == "Leniently sorted")$NCC_AMS1,
+             y = subset(full.SO, subset = type== "Unsorted")$NCC_AMS1)
+```
+
+# NCC markers
+## Def NCCs in unsorted samp
+```{r}
+unsort.SO <- full.SO %>% 
+  subset(cells = Cells(subset(full.SO, subset = type == "Unsorted")))
+
+# Extract SOX10 expression (RNA assay, default data slot)
+sox10_expr <- GetAssayData(unsort.SO, assay = "SCT", layer = "data")["SOX10", ]
+
+# Create NCC classification
+unsort.SO$NCC <- ifelse(sox10_expr > 0, "NCC", "Other")
+rm(sox10_expr); gc()
+
+# Optionally make it a factor with defined order
+unsort.SO$NCC <- factor(unsort.SO$NCC, levels = c("Other", "NCC"))
+
+unsort.SO$NCC %>% table()
+```
+
+## Plot unsort samp in umap
+```{r}
+Idents(unsort.SO) <- unsort.SO$type
+P03 <- DimPlot(unsort.SO, 
+               reduction = "umap_harmony", group.by = "NCC",
+               order = c("NCC", "Other"),
+               alpha = 0.7, stroke.size = 0, pt.size = 1) + 
+  scale_color_manual(values = c("Other" = "#BDBDBD",
+                                "NCC"   = "#ffc64fff")) + 
+  labs(y = "umap 2", x = "umap 1") +
+  theme(plot.margin = margin(t=1.7, r=1, b=1.7, l=0.4, unit = "mm"),
+        axis.text.y = element_text(size = 8, angle = 45),
+        axis.title.y = element_text(size = 11),
+          
+        axis.text.x = element_text(size = 8, angle = 45),
+        axis.title.x = element_text(size = 11),
+
+        legend.text = element_text(size = 11),
+        legend.key.size = unit(2.5, "mm"),
+        legend.title = element_text(size = 11),
+        legend.position = "inside",
+        
+        plot.title = element_blank())
+P03
+
+ggsave(paste0(path, "03_Results/UMAP_Unsort.svg"),
+       P03, height = 89, width = 89, units = "mm")
+```
+
+```{r}
+P03_inset <- FetchData(unsort.SO, 
+          vars = c("SOX10", "nCount_RNA"),
+          assay = "RNA,", 
+          layer = "count") %>%
+  mutate(Sox10_PM = SOX10 / (nCount_RNA / 1e6),
+         logSox10_PM = log1p(Sox10_PM)) %>%
+  ggplot(aes(x = logSox10_PM, fill = SOX10 == 0)) +
+  geom_histogram(binwidth = 1) +
+  
+  scale_x_continuous(breaks = log1p(c(0, 200, 800)),
+                     labels = c("0", "200", "800")) +
+  
+  scale_y_break(breaks = c(150, 10450)) +
+  scale_y_continuous(breaks = c(0, 100, 10500, 10600),
+                     labels = c("0", "100", "10500", "10600"),
+                     limits = c(0, 10610)) +
+  
+  scale_fill_manual(values = c(`TRUE`  = "#BDBDBD",   # bar at 0
+                               `FALSE` = "#ffc64fff"),  # non-zero bars
+                    guide = "none") +
+  #labs(x = "Sox10 per 1M",  y = "Freq.") +
+  theme_classic() +
+  theme(plot.margin = margin(t=0, r=0, b=0, l=0),
+
+        axis.text.y.right  = element_blank(),
+        axis.ticks.y.right = element_blank(),
+        axis.line.y.right = element_blank(),
+        
+        axis.title = element_blank(),
+        axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+        axis.text.y = element_text(size = 8, angle = 45, vjust = 0.5))
+
+ggsave(paste0(path, "03_Results/UMAP_Unsort_hist.svg"),
+       P03_inset, height = 35, width = 40, units = "mm")
+P03_inset
+```
+
+## Calc diff. exp.
+This does differential expression testing between NCCs (Sox10 positive cells) 
+and all other cells in the unsorted samples.
+```{r}
+Idents(unsort.SO) <- unsort.SO$NCC
+DEG.df <- FindMarkers(unsort.SO, 
+                          ident.1 = "NCC",
+                          only.pos = FALSE,
+                          logfc.threshold = 0,
+                          min.pct = 0)
+DEG.df$gene <- rownames(DEG.df)
+
+#Add average normalized expression in NCCs to the dataframe
+avg_NCC_exp <- unsort.SO %>%
+  subset(subset = NCC == "NCC") %>%
+  GetAssayData(assay = "SCT", layer = "counts") %>%
+  rowMeans()
+DEG.df <- DEG.df %>% mutate(avg_NCC_exp = avg_NCC_exp[rownames(DEG.df)])
+rm(avg_NCC_exp); gc()
+
+# Add negative log10 p column
+DEG.df$neg_log10p <- log10(DEG.df$p_val)*-1
+
+DEG.df %>% head()
+DEG.df %>% str()
+```
+
+## Def NCC markers
+```{r}
+#Subset DE table
+NCCmrkrs.df <- DEG.df %>%       #Use only:
+  subset(avg_log2FC > 0.1) %>%  # -Genes with relevant effect size
+  subset(p_val_adj <= 0.05) %>% # -Significantly different genes
+  subset(avg_NCC_exp > 0.05) #%>%    # -Genes with informative mean exp in NCCs
+  #subset(pct.1 >= 0.01) 
+
+#Add column to label the NCC markers in DEG.df
+DEG.df$NCCmrkrs <- ifelse(DEG.df$gene %in% NCCmrkrs.df$gene, "Yes", "No")
+
+##Save table for supplementary as .csv
+#DEG.df %>% 
+#  #Select the rellevant columns
+#  select(gene, avg_log2FC, avg_NCC_exp, p_val_adj, NCCmrkrs) %>%
+#  #Reorder the rows to make it easier to find the markers at a glance
+#  arrange(factor(NCCmrkrs, levels = c("Yes", "No")),
+#          p_val_adj,
+#          desc(avg_log2FC)
+#          ) %>% 
+#  # Round off all values 
+#  mutate(avg_log2FC = round(avg_log2FC, 3),
+#         avg_NCC_exp = round(avg_NCC_exp, 3),
+#         p_val_adj = case_when(
+#           p_val_adj < 0.001 ~ "<0.001",
+#           p_val_adj > 0.001  ~ as.character(round(p_val_adj, 3)))) %>% 
+#  # rename the columns for readability
+#  rename("Gene"                       = gene,
+#         "Average log2-fold change"   = avg_log2FC,
+#         "Average SCT counts in NCCs" = avg_NCC_exp,
+#         "Adjusted p-value"           = p_val_adj,
+#         "NCC markers"                = NCCmrkrs) %>%
+#  write.csv(paste0(path, "03_Results/",
+#                   "DiffExpAll_", Sys.Date(), ".csv"), 
+#            row.names = FALSE)
+
+```
+
+## Plotting
+Here i plot differential expression in a few different ways for one of the 
+figures in the paper.
+
+## MA plot
+```{r}
+#Plot
+P04 <- DEG.df %>%
+  mutate(avg_log2FC = ifelse(avg_log2FC > 5, 5, avg_log2FC)) %>%
+  mutate(avg_log2FC = ifelse(avg_log2FC < -5, -5, avg_log2FC)) %>%
+  mutate(avg_NCC_exp = ifelse(avg_NCC_exp > 10, 10, avg_NCC_exp)) %>%
+  arrange(NCCmrkrs == "Yes") %>% 
+  
+  ggplot(aes(y = avg_log2FC, x = avg_NCC_exp, color = NCCmrkrs)) +
+  geom_point(shape = 19, size = .7, alpha = .7) +
+  scale_x_continuous(trans = scales::log1p_trans()) +
+  scale_color_manual(values = c("Yes" = "#ffc64fff", "No" = "#BDBDBD")) +
+  ylab(label = TeX('$log_{2}$(fold change)')) +
+  xlab(label = "Mean expressin in putative NCCs, log(x+1)")+
+  labs(title = "Differential expression", 
+       color = "NCC markers") +
+  theme(plot.title = element_blank(),   
+        axis.title.y = element_text(size = 11),
+        axis.title.x = element_text(size = 11),
+        axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 8),
+        legend.title = element_text(size = 8),
+        legend.key.size = unit(2.5, "mm"),
+        legend.position = "none",
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.border = element_rect(colour = "black", fill = NA)) +
+  geom_vline(xintercept = .05, linetype = "dashed") + 
+  geom_hline(yintercept = .2, linetype = "dashed") 
+P04
+
+ggsave(filename = paste0(path, "03_Results/MAPlot.svg"),
+      plot = P04, height = 89, width = 89, units = "mm")
+```
+
+## Volcano plot
+### Lebels
+```{r}
+# Manually set some selected genes to label
+Volcano_labels <- c("SOX10", "EDNRB", "TFAP2A", "TFAP2B", "ZEB2", 
+                    "PAX7", "ETS1", "SOX8", "SOX5", 
+                    
+                    "GYPC", "ACBD7", "RAB19")
+
+Volcano_labels <- NCCmrkrs.df[Volcano_labels, ]
+
+Volcano_labels <- Volcano_labels %>% 
+  mutate(avg_log2FC = ifelse(avg_log2FC > 7, 7, avg_log2FC)) %>%
+  mutate(avg_log2FC = ifelse(avg_log2FC < -7, -7, avg_log2FC)) %>%
+  mutate(neg_log10p = ifelse(neg_log10p > 100, 100, neg_log10p))
+
+Volcano_labels
+```
+
+### Plot
+```{r}
+# Set line for p value
+sig_line <- DEG.df %>% 
+  arrange(NCCmrkrs == "Yes") %>% {log10(0.05/nrow(.))*-1}
+
+#Construct the plot
+P05 <- DEG.df %>% 
+  mutate(avg_log2FC = ifelse(avg_log2FC > 7, 7, avg_log2FC)) %>%
+  mutate(avg_log2FC = ifelse(avg_log2FC < -7, -7, avg_log2FC)) %>%
+  mutate(neg_log10p = ifelse(neg_log10p > 100, 100, neg_log10p)) %>%
+  arrange(NCCmrkrs == "Yes") %>% 
+  
+  ggplot(aes(x = avg_log2FC, y = neg_log10p, color = NCCmrkrs)) + 
+  geom_point(shape = 19, size = .7, alpha = .7) +
+  geom_vline(xintercept = 0.2, linetype = "dashed") +
+  geom_hline(yintercept = sig_line, linetype = "dashed") +
+  scale_color_manual(values = c("Yes" = "#ffc64fff", "No" = "#BDBDBD")) +
+  ylab(label = TeX('$-log_{10}$(adj. p-value)')) +
+  xlab(label = TeX('$log_{2}$(fold change)')) +
+  labs(title = "NCC markers", 
+       color = "NCC markers") +
+  geom_label_repel(data = Volcano_labels, 
+                  #Italic lowercase gene names 
+                  aes(label = paste0("italic(", str_to_sentence(gene), ")")),
+                  parse = TRUE,
+                  color = "black", 
+                  max.overlaps = 20,
+                  nudge_x = -4,
+                  size = 3,
+                  label.padding = 0.1,
+                  label.r = .1) +
+  theme(plot.title = element_blank(),   
+        axis.title.y = element_text(size = 11),
+        axis.title.x = element_text(size = 11),
+        axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 8),
+        #Background
+        plot.background = element_rect(fill = "white", color = "white"),
+        panel.background = element_rect(fill = "white", color = "white"),
+        panel.border = element_rect(colour = "black", fill = NA),
+        legend.position = "none")
+P05
+ggsave(filename = paste0(path, "03_Results/VolcanoPlot.svg"),
+      plot = P05, height = 89, width = 89, units = "mm")
+```
+
+
+```{r}
+P05 + geom_point(
+    data = DEG.df %>% filter(gene == "GYPC"), # Change gene to label the point 
+    aes(x = avg_log2FC, y = neg_log10p),       # of your choice
+    color = "red", size = 2)
+```
+
+# Module score new NCC markers
+```{r}
+full.SO <- AddModuleScore(full.SO, 
+                          list(NCCmrkrs.df$gene),
+                          #Or, excluding Sox10:
+                          #list(NCCmrkrs.df$gene[2:length(NCCmrkrs.df$gene)]), 
+                          name = "NewNCCmrkrsAMD")
+```
+
+```{r}
+P06 <- full.SO@meta.data %>%
+  ggplot(aes(x = type, fill = type, y = NewNCCmrkrsAMD1)) +
+  geom_violin() +
+  scale_fill_manual(values = c("Unsorted"          = "#BDBDBD",
+                               "Leniently sorted"  = "#53AC90",
+                               "Strictly sorted"   = "#64EC09")) +
+  labs(y = "NCC marker module score") +
+  theme_classic() +
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_text(size = 11),
+        axis.text = element_text(size = 8),
+        legend.position = "none")
+    
+ggsave(filename = paste0(path, "03_Results/NCCmrkrVln.svg"),
+      plot = P06, height = 89, width = 89, units = "mm")
+P06
+```
+
+# Save data
+Save the filtered data and meta data in an RDS file to be read by the next script in the pipeline (04_IntAnalysis10XAndSmrtS.Rmd)
+```{r}
+full.SO
+saveRDS(full.SO, paste0(path, 
+                       "02_Analysis/04_IntAnalysis_output_", 
+                       Sys.Date(),
+                       ".Rds"))
+```
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+```

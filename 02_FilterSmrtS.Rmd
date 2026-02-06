@@ -1,0 +1,338 @@
+---
+title: "filtering"
+author: "Robin Pranter"
+date: "2025-03-03"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Setup
+```{r}
+options(future.globals.maxSize = 120000 * 1024^2) # Change this to fit your 
+Sys.setenv(R_MAX_VSIZE = "120Gb")                 # computer
+
+rm(list= ls()); gc()
+start_time <- Sys.time()
+
+path <- "~/WorkDirs/PmurNCCPilot_10X_rerun/"
+
+# Load libraries
+library(Seurat, lib.loc = "/usr/local/lib/R/site-library")   # Change this to
+library(tidyverse, lib.loc = "/usr/local/lib/R/site-library")# mach the location
+library(patchwork, lib.loc = "/usr/local/lib/R/site-library")# of your libraries
+```
+
+# Read data
+Read in the RDS-object that has all the data and metadata calculated and 
+compiled by 01_CompileSmrtS.Rmd. 
+```{r}
+filename <- list.files(paste0(path, "02_Analysis/"), 
+           pattern = "01_CompileSmrtS_output_")
+if (length(filename) == 1) {
+  all.SO <- readRDS(file = paste0(path, "02_Analysis/", filename))
+  } else {
+    print(paste0("You have two files matching the pattern. ", 
+                 "Choose one to read and remove the other from the directory."))
+    print(filename)
+    }
+rm(filename)
+```
+
+## Basic stats
+```{r}
+all.SO@meta.data %>% 
+  subset(SomSt == "28ss") %>%
+  summarize(n = n(),
+            av_count = mean(nCount_RNA) %>% round(),
+            sd_count = sd(nCount_RNA) %>% round(),
+            av_genes = mean(nFeature_RNA) %>% round(),
+            sd_genes = sd(nFeature_RNA) %>% round()) %>%
+  t()
+```
+
+# Filter
+```{r}
+# Define a list with the cell filter cutoff values
+c_filters <- list(nCount_RNA    = 1500,
+                  nFeature_RNA  = 1500,
+                  nCount_ERCC   = 300,
+                  nFeature_ERCC = NA,
+                  mapped_perc   = 40,
+                  exonic_perc   = 73,
+                  intron_perc   = NA,
+                  intgen_perc   = NA,
+                  percent.mt    = 16,
+                  percent.rb    = 7)
+# Feture filter
+f_filter <- 5
+```
+
+## Vissualize filters
+### Feature filter
+```{r}
+P04 <- list(
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) %>% 
+  as.data.frame %>% 
+  dplyr::rename(num_cells = ".") %>%
+  ggplot(aes(x = num_cells)) +
+  #geom_density(fill = "blue", alpha = 0.5) +
+  geom_histogram(fill = "blue", alpha = 0.5, bins = 120) +
+  labs(title = "Density of detected genes per cell",
+       x = "Number of cells a gene is detected in",
+       y = "Density") +
+  geom_vline(xintercept = f_filter) +
+  theme_minimal() + 
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none"),
+  
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) %>%
+  as.data.frame %>% 
+  dplyr::rename(num_cells = ".") %>%
+  ggplot(aes(x = num_cells)) +
+  #geom_density(fill = "purple", alpha = 0.5) +
+  geom_histogram(fill = "purple", alpha = 0.5, bins = 120) +
+  scale_x_continuous(transform = "log1p") +
+  labs(title = "Density of detected genes per cell",
+       x = "Number of cells a gene is detected in (ln(x+1))",
+       y = "Density") +
+  geom_vline(xintercept = f_filter) +
+  theme_minimal() +
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45),
+        legend.position = "none")
+)
+P04 <- wrap_plots(P04, ncol = 1)
+P04
+```
+
+```{r}
+P05 <- cbind(Matrix::rowSums(all.SO[["RNA"]]$counts > 0),
+             Matrix::rowSums(all.SO[["RNA"]]$counts)) %>%
+  as.data.frame() %>%
+  dplyr::rename(num_cells = "V1", tot_exp = "V2") %>%
+  ggplot(aes(x = tot_exp, y = num_cells)) +
+  geom_point(alpha = .1, col = "blue") + 
+  scale_x_continuous(transform = "log1p") +
+  scale_y_continuous(transform = "log1p") +
+  geom_hline(yintercept = f_filter) +
+  labs(y = "Number of cells a gene is detected in (ln(x+1))",
+       x = "total expression (ln(x+1))") +
+  theme(text = element_text(size = 6),
+        axis.title.x = element_text(size = 6),
+        axis.title.y = element_text(size = 6),
+        axis.text = element_text(size = 6, angle = 45, hjust = 1))
+P05
+```
+
+### Cell filters
+```{r}
+# Create a VlnPlot for each feature
+P06 <- lapply(seq_along(c_filters), function(i) {
+  p <- VlnPlot(all.SO, features = names(c_filters)[i], 
+               pt.size = .1, assay = "RNA", layer = "counts")
+  
+  # Add geom_hline only if the value is not NA
+  if (!is.na(c_filters[[i]])) {
+    p <- p + geom_hline(yintercept = c_filters[[i]]) +
+      geom_text(aes(x = .2, y = c_filters[[i]], label = c_filters[[i]]), 
+                col = "black", hjust = 0, vjust = -0.5, 
+                size = 8*.35) # *.35 translates pt to mm
+  }
+  
+  #Make it pretty with themes
+  p + theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.text.y = element_text(size = 6, angle = 45),
+            axis.text.x = element_blank(),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+
+# Combine all plots into a single plot
+P06 <- wrap_plots(P06, ncol = 5) + 
+  plot_layout(guides = "collect") +
+  plot_annotation("All data")
+# Display the combined plot
+P06
+```
+
+## Detection based filter
+By "detection based filtering" I mean removal of cells with low numbers of 
+detected genes, and removal of genes that are detected in few cells.
+```{r}
+# Filter cells
+selected_c <- WhichCells(all.SO, 
+                         expression = nFeature_RNA > c_filters$nFeature_RNA)
+# Filter features (=genes)
+selected_f <- rownames(all.SO)[
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) >= f_filter]
+# This removes all genes that are detected in 4 or fewer cells.
+
+#The actual filtering happens here
+det.SO <- subset(all.SO, cells = selected_c, features = selected_f)
+rm(selected_c, selected_f)
+
+#Compare the unfiltered and filtered data sets
+dim(all.SO)
+dim(det.SO)
+print(paste0("Genes removed: ", dim(all.SO)[1] - dim(det.SO)[1]))
+print(paste0("Cells removed: ", dim(all.SO)[2] - dim(det.SO)[2]))
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+det.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+```
+
+## Targeted genes removal 
+```{r}
+#Remove mitochondrial genes
+#Define list of mitochondrial genes
+mito_genes <- c("ND1", "CYTB", "ND6", "ND5", "ND4",  #This is all mitochondrial
+                "ND4L", "ND3", "COX3", "ATP6",       #genes in mitochondrial 
+                "ATP8", "COX2", "COX1", "ND2")       #reference genome 
+selected_f <- rownames(det.SO)[!(rownames(det.SO) %in% mito_genes)]
+
+#Remove ribosomal genes
+selected_f <- selected_f[!grepl("^RP[SL]", selected_f)] # This removes rRNA
+
+# Remove all genes named UnnamedGeneX
+selected_f <- selected_f[!grepl("UnnamedGene", selected_f)]
+#By running 
+#"grep 'UnnamedGene' GCF_004329235.1_PodMur_1.0_genomic_mod.gtf | less -S"
+#I could see that these were all tRNA or rRNA
+
+# Filter
+det.SO <- subset(det.SO, features = selected_f)
+rm(selected_f, mito_genes); gc()
+
+#Compare the unfiltered and filtered data sets
+dim(all.SO)
+dim(det.SO)
+print(paste0("Genes removed: ", dim(all.SO)[1] - dim(det.SO)[1]))
+print(paste0("Cells removed: ", dim(all.SO)[2] - dim(det.SO)[2]))
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+det.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+```
+
+### Plot QCs after detection based filt
+```{r}
+# Create a VlnPlot for each feature
+P07 <- lapply(seq_along(c_filters), function(i) {
+  p <- VlnPlot(det.SO, features = names(c_filters)[i], 
+               pt.size = .1, assay = "RNA", layer = "counts")
+  
+  # Add geom_hline only if the value is not NA
+  if (!is.na(c_filters[[i]]) & names(c_filters)[i] != "nFeature_RNA") {
+    p <- p + geom_hline(yintercept = c_filters[[i]]) +
+      geom_text(aes(x = .2, y = c_filters[[i]], label = c_filters[[i]]), 
+                col = "black", hjust = 0, vjust = -0.5, 
+                size = 8*.35) # *.35 translates pt to mm
+  }
+  
+  #Make it pretty with themes
+  p + theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.text.y = element_text(size = 6, angle = 45),
+            axis.text.x = element_blank(),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+
+# Combine all plots into a single plot
+P07 <- wrap_plots(P07, ncol = 5) + 
+  plot_layout(guides = "collect") +
+  plot_annotation("Detection filtered data")
+# Display the combined plot
+P07
+```
+
+By only filtering based on nFeature_RNA most of the potential problems in the 
+data is already removed. Here I mainly mean the hump of cells with low values in nCount_RNA, mapped_perc and exonic_pers. This is good, it means that the QCs 
+tell a coherent story. I will do some additional filtering of the other QCs.
+
+## QC-metric filtering
+```{r}
+# Select cells
+selected_nCou <- WhichCells(det.SO,expression=nCount_RNA >c_filters$nCount_RNA)
+selected_mito <- WhichCells(det.SO,expression=percent.mt <c_filters$percent.mt)
+selected_mapp <- WhichCells(det.SO,expression=mapped_perc>c_filters$mapped_perc)
+selected_exon <- WhichCells(det.SO,expression=exonic_perc>c_filters$exonic_perc)
+selected_ERCC <- WhichCells(det.SO,expression=nCount_ERCC<c_filters$nCount_ERCC)
+selected_ribo <- WhichCells(det.SO,expression=percent.rb >c_filters$percent.rb)
+
+#and subset to only keep those cells
+filt.SO <- subset(det.SO, cells = Reduce(intersect, list(selected_nCou,
+                                                         selected_mito,
+                                                         selected_mapp,
+                                                         selected_exon,
+                                                         selected_ERCC,
+                                                         selected_ribo)))
+#Compare the unfiltered and filtered data sets
+dim(all.SO)
+dim(det.SO)
+dim(filt.SO)
+print(paste0("Genes removed (det based filt): ",dim(all.SO)[1]-dim(det.SO)[1]))
+print(paste0("Cells removed (det based filt): ",dim(all.SO)[2]-dim(det.SO)[2]))
+print(paste0("Add. cells removed (full filt): ",dim(det.SO)[2]-dim(filt.SO)[2]))
+all.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+det.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+filt.SO@meta.data %>% select(Pheno, SomSt_Simp) %>% table()
+```
+
+### Plot QCs after QC based filt
+```{r}
+# Create a VlnPlot for each feature
+P08 <- lapply(seq_along(c_filters), function(i) {
+  p <- VlnPlot(filt.SO, features = names(c_filters)[i], 
+               pt.size = .1, assay = "RNA", layer = "counts")
+  
+  # Add geom_hline only if the value is not NA
+  if (!is.na(c_filters[[i]]) & names(c_filters)[i] != "nFeature_RNA") {
+    p <- p + geom_hline(yintercept = c_filters[[i]]) +
+      geom_text(aes(x = .2, y = c_filters[[i]], label = c_filters[[i]]), 
+                col = "black", hjust = 0, vjust = -0.5, 
+                size = 8*.35) # *.35 translates pt to mm
+  }
+  
+  #Make it pretty with themes
+  p + theme(text = element_text(size = 6),
+            axis.title.x = element_blank(),
+            axis.text.y = element_text(size = 6, angle = 45),
+            axis.text.x = element_blank(),
+            legend.text = element_text(size = 6),
+            legend.title = element_text(size = 6),
+            legend.key.size = unit(3, "mm"))
+  })
+
+# Combine all plots into a single plot
+P08 <- wrap_plots(P08, ncol = 5) + 
+  plot_layout(guides = "collect") +
+  plot_annotation("QC filtered data")
+# Display the combined plot
+P08
+```
+
+# Save data
+Save the filtered data and meta data in an RDS file to be read by the next script in the pipeline (04_IntAnalysis10XAndSmrtS.Rmd)
+```{r}
+filt.SO
+saveRDS(filt.SO, paste0(path, 
+                       "02_Analysis/02_FilterSmrtS_output_", 
+                       Sys.Date(),
+                       ".Rds"))
+```
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+sessionInfo()
+```

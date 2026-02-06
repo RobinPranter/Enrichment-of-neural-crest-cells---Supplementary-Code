@@ -1,0 +1,395 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-01-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Set up 
+
+Set up workspace, read libraries and source functions. 
+```{r, message=FALSE, echo=FALSE}
+# Increase maximum memory available to R
+options(future.globals.maxSize = 120000 * 1024^2) # Change this to fit your 
+Sys.setenv(R_MAX_VSIZE = "120Gb")                 # computer
+
+rm(list = ls()); invisible(gc())
+start_time <- Sys.time()
+
+# Load libraries
+library(Seurat, lib.loc = "/usr/local/lib/R/site-library")   # Change this to
+library(tidyverse, lib.loc = "/usr/local/lib/R/site-library")# mach the location
+library(DoubletFinder)                                       # of your libraries
+
+path <- "~/WorkDirs/PmurNCCPilot_10X_rerun/"
+```
+
+# Read data
+```{r}
+#Load data
+Pmur_82.SO <- Seurat::Read10X_h5(filename = paste0(path,
+                   "02_Analysis/10X_21_082/outs/filtered_feature_bc_matrix.h5"),
+                    use.names = T) %>%
+  CreateSeuratObject(project = "Pmur_82")
+
+Pmur_84.SO <- Seurat::Read10X_h5(filename = paste0(path, 
+                   "02_Analysis/10X_21_084/outs/filtered_feature_bc_matrix.h5"),
+                    use.names = T) %>%
+  CreateSeuratObject(project = "Pmur_84")
+
+Pmur_85.SO <- Seurat::Read10X_h5(filename = paste0(path, 
+                   "02_Analysis/10X_21_085/outs/filtered_feature_bc_matrix.h5"),
+                    use.names = T) %>%
+  CreateSeuratObject(project = "Pmur_85")
+
+#Add Sorted/unsorted in metadata
+Pmur_82.SO$type <- "Sorted"
+Pmur_84.SO$type <- "Unsort"
+Pmur_85.SO$type <- "Unsort"
+
+# Merge objects
+all.SO <- merge(Pmur_82.SO, c(Pmur_84.SO, Pmur_85.SO), 
+                add.cell.ids = c("Pmur_82.SO", "Pmur_84.SO", "Pmur_85.SO"))
+rm(Pmur_82.SO, Pmur_84.SO, Pmur_85.SO); invisible(gc())
+
+# Join layers
+all.SO[["RNA"]] <- JoinLayers(all.SO[["RNA"]])
+# (the counts layers in the RNA assays gets added as separate layers for each
+# sample in the merged object. Here I join them together in one layer)
+
+all.SO
+```
+
+## Basic stats
+```{r}
+all.SO@meta.data %>%
+  group_by(type) %>% 
+  summarize(n = n(),
+            av_count = mean(nCount_RNA) %>% round(),
+            sd_count = sd(nCount_RNA) %>% round(),
+            av_genes = mean(nFeature_RNA) %>% round(),
+            sd_genes = sd(nFeature_RNA) %>% round()) %>%
+  t()
+```
+
+
+# Calc metadata
+```{r}
+## %mitochondrial reads
+#Define list of mitochondrial genes
+mito_genes <- c("ND1", "CYTB", "ND6", "ND5", "ND4",  #This is all mitochondrial
+                "ND4L", "ND3", "COX3", "ATP6",       #genes in mitochondrial 
+                "ATP8", "COX2", "COX1", "ND2")       #reference genome 
+#NCBI: FJ460597.1
+all.SO <- PercentageFeatureSet(all.SO,
+                               features = mito_genes,
+                               col.name = "percent.mt")
+
+## %ribosomal reads
+#Define list of ribosomal genes
+ribo_genes <- rownames(all.SO)[grep("^RP[SL]", rownames(all.SO))]
+all.SO <- PercentageFeatureSet(all.SO,
+                               features = ribo_genes,
+                               col.name = "percent.rb")
+
+## list meta data variables
+names(all.SO@meta.data)
+```
+
+# Filter
+I do three types of filtering: detection based filtering, filtering based on 
+QC-metrics and removal of doublets.
+
+## Detection based filtering
+By "detection based filtering" I mean removal of cells with low numbers of 
+detected genes and removal of genes that are detected in few cells.
+```{r}
+#Select cells
+selected_c <- WhichCells(all.SO, expression = nFeature_RNA > 700)
+
+#Select genes
+#selected_f <- rownames(all.SO)[
+#  Matrix::rowSums(all.SO@assays$RNA@layers$counts) > 3]
+selected_f <- rownames(all.SO)[
+  Matrix::rowSums(all.SO[["RNA"]]$counts > 0) >= 20]
+
+#Filter
+filt.SO <- subset(all.SO, cells = selected_c, features = selected_f)
+rm(selected_c, selected_f)
+
+#Also remove the extreme outlyer in nCount_RNA.
+selected_c <- WhichCells(all.SO, expression = nCount_RNA < 90000)
+filt.SO <- subset(filt.SO, cells = selected_c)
+rm(selected_c)
+
+#also remove ribo and mito genes
+filt.SO <- filt.SO[ ! rownames(filt.SO) %in% mito_genes, ]
+filt.SO <- filt.SO[ ! rownames(filt.SO) %in% ribo_genes, ]
+
+dim(all.SO)
+dim(filt.SO)
+table(all.SO$orig.ident)
+table(filt.SO$orig.ident)
+#rm(all.SO);invisible(gc())
+```
+
+## QC-metric filtering
+```{r}
+# Select cells
+selected_mito <- WhichCells(filt.SO, expression = percent.mt < 15)
+selected_ribo <- WhichCells(filt.SO, expression = percent.rb > 15)
+
+#and subset to only keep those cells
+filt.SO <- subset(filt.SO, cells = selected_mito)
+filt.SO <- subset(filt.SO, cells = selected_ribo)
+rm(selected_mito, selected_ribo)
+
+dim(filt.SO)
+```
+
+## Cell cykle state
+Since the sorted sample is sorted based on DAPI while the unsorted samples are
+unsorted it is important to check that the samples don't differ in cell cycle.
+
+### Prep SO for CC-scoring
+```{r}
+# Normalize and scale data and find variable features (all in SCTransform())
+filt.SO <- SCTransform(filt.SO,
+                       assay = 'RNA',
+                       new.assay.name = 'SCT',
+                       vars.to.regress = c('percent.mt'),
+                       method = "glmGamPoi",
+                       variable.features.n = 3000) #3000 is default
+```
+
+### Find CC-markers
+#### Read Lizard Human Ortho-table
+```{r}
+Ortho.df <- read.csv(file=paste0(path, "01_Data/",
+                          "Pmur1.0Human_OrthoTable_BioMartManDL20241206.txt"))
+```
+
+#### Find Lizard S and G2M orthos
+```{r}
+# Save S and G2M markers in Pmur
+G2M.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                        cc.genes.updated.2019$g2m.genes, ]$Gene.name
+S.genes <- Ortho.df[Ortho.df$Human.gene.name %in% 
+                      cc.genes.updated.2019$s.genes, ]$Gene.name
+
+#Check that the markers are present in the data
+print(paste0(filt.SO %>% Features() %in% G2M.genes %>% sum(), "/",
+             G2M.genes %>% length(), 
+             " G2M-markers are present in the data"))
+print(paste0(filt.SO %>% Features() %in% S.genes %>% sum(), "/",
+             S.genes %>% length(), 
+             " S-markers are present in the data"))
+
+#Subset only the genes that are present
+G2M.genes <- G2M.genes[G2M.genes %in% Features(filt.SO)]
+S.genes <- S.genes[S.genes %in% Features(filt.SO)]
+```
+
+### Calc score
+```{r}
+# Predict cell cycle state (make sure to specify the "assay" parameter)
+filt.SO <- CellCycleScoring(filt.SO,
+                            s.features = S.genes,
+                            g2m.features = G2M.genes,
+                            assay = 'SCT',
+                            set.ident = TRUE)
+```
+
+## Doublet filter
+To remove doublet cells I will use the package doublet finder (DF). First I need
+a UMAP and cluster classifications. Then I can estimate some parameters for the
+doublet prediction. Last I can run the prediction and remove the predicted
+doublets. One of the parameters (the estimated doublet percentage, here names
+EstDoubPerc) can not be estimated from the data but must be set by myself 
+informed by the literature. 
+
+### Prep SO for DF
+Doublet finder needs clusters to calc doublets. Here I run the standard Seurat 
+pipeline for clustering. I will redo this later after all filtering is finished. 
+```{r}
+#Reduce dimensions using PCA and UMAP
+filt.SO <- RunPCA(filt.SO, verbose = F, npcs = 20, assay = "SCT") 
+#Cluster
+filt.SO <- FindNeighbors(filt.SO, dims = 1:10)
+filt.SO <- FindClusters(filt.SO)
+
+#DF should be run on each sample separately. 
+#Therefor I split the SO in to six SOs and store them in a list
+HVGs <- VariableFeatures(filt.SO)
+split.list <- SplitObject(filt.SO, split.by = "orig.ident")
+```
+
+### Predict doublets
+#### Est pK & set exp % doublets
+```{r}
+#pK Identification (no ground-truth)
+#sweep.list <- paramSweep(split.list$Pmur_85, PCs = 1:10, sct = TRUE) #choose sample
+#sweep.stat <- summarizeSweep(sweep.list, GT = FALSE)
+#bcmvn_Pmur <- find.pK(sweep.stat)
+
+#Plot pK values against the mean-variance normalized bimodality coefficient
+#plot(as.numeric(as.character(bcmvn_Pmur$pK)), bcmvn_Pmur$BCmetric, type = "b")
+#subset(bcmvn_Pmur, subset = BCmetric == max(bcmvn_Pmur$BCmetric))
+
+#Set estimated pK based on plot from find.pK() above 
+est_pK_82 <- .07
+est_pK_84 <- .05
+est_pK_85 <- .09
+
+#Set exp perc doublets based on table under point 8 here: 
+#https://nbisweden.github.io/workshop-scRNAseq/labs/seurat/seurat_01_qc.html
+ExpDubPerc_82 <- .03
+ExpDubPerc_84 <- .065
+ExpDubPerc_85 <- .05
+
+#Based on expected doublet percentage, Homotypic Doublet Proportion Estimate
+homotypic.prop_82 <-modelHomotypic(split.list$Pmur_82@meta.data$seurat_clusters)
+nExp_poi_82       <-round(ExpDubPerc_82*nrow(split.list$Pmur_82@meta.data))
+
+homotypic.prop_84 <-modelHomotypic(split.list$Pmur_84@meta.data$seurat_clusters)
+nExp_poi_84       <-round(ExpDubPerc_84*nrow(split.list$Pmur_84@meta.data))
+
+homotypic.prop_85 <-modelHomotypic(split.list$Pmur_85@meta.data$seurat_clusters)
+nExp_poi_85       <-round(ExpDubPerc_85*nrow(split.list$Pmur_85@meta.data))
+```
+
+#### Run DoubletFinder
+```{r, message = FALSE}
+#Using the unadjusted poison expected doublet number -nExp_poi_Px-
+split.list$Pmur_82 <- doubletFinder(split.list$Pmur_82, 
+                                    PCs = 1:10,
+                                    pN = 0.25, 
+                                    pK = est_pK_82, 
+                                    nExp = nExp_poi_82, 
+                                    reuse.pANN = NULL, 
+                                    sct = TRUE)
+names(split.list$Pmur_82@meta.data)[grepl("DF.classification", 
+                              names(split.list$Pmur_82@meta.data))] <- "DF.pred"
+sum(split.list$Pmur_82@meta.data$DF.pred == "Singlet")
+nrow(split.list$Pmur_82@meta.data)
+
+split.list$Pmur_84 <- doubletFinder(split.list$Pmur_84, 
+                                    PCs = 1:10,
+                                    pN = 0.25, 
+                                    pK = est_pK_84, 
+                                    nExp = nExp_poi_84, 
+                                    reuse.pANN = NULL, 
+                                    sct = TRUE)
+names(split.list$Pmur_84@meta.data)[grepl("DF.classification", 
+                              names(split.list$Pmur_84@meta.data))] <- "DF.pred"
+sum(split.list$Pmur_84@meta.data$DF.pred == "Singlet")
+nrow(split.list$Pmur_84@meta.data)
+
+split.list$Pmur_85 <- doubletFinder(split.list$Pmur_85, 
+                                    PCs = 1:10,
+                                    pN = 0.25, 
+                                    pK = est_pK_85, 
+                                    nExp = nExp_poi_85, 
+                                    reuse.pANN = NULL, 
+                                    sct = TRUE)
+names(split.list$Pmur_85@meta.data)[grepl("DF.classification", 
+                              names(split.list$Pmur_85@meta.data))] <- "DF.pred"
+sum(split.list$Pmur_85@meta.data$DF.pred == "Singlet")
+nrow(split.list$Pmur_85@meta.data)
+gc()
+```
+
+### Merge data
+```{r}
+#Merge
+filt.SO <- merge(split.list$Pmur_82, c(split.list$Pmur_84, split.list$Pmur_85))
+filt.SO[["RNA"]] <- JoinLayers(filt.SO[["RNA"]])
+VariableFeatures(filt.SO) <- HVGs; rm(HVGs)
+```
+
+### Remove doublets
+Judgeing by the nCount_RNA, the predicted doublets might not even be doublets 
+(they don't have higher than expected gene expression). However, I will remove 
+them anyway to be conservative.
+
+```{r}
+#Filter
+dim(filt.SO)
+filt.SO <- subset(filt.SO, DF.pred == "Singlet")
+dim(filt.SO)
+
+#Remove spacious objects
+rm(split.list,
+   est_pK_82, est_pK_84, est_pK_85,
+   
+   homotypic.prop_82, homotypic.prop_84, homotypic.prop_85, 
+   
+   nExp_poi.adj_82, nExp_poi.adj_84, nExp_poi.adj_85,
+   
+   nExp_poi_82, nExp_poi_84, nExp_poi_85,
+   
+   ExpDubPerc_82, ExpDubPerc_84, ExpDubPerc_85); invisible(gc())
+```
+
+## Filter cells with high exp
+```{r}
+#select cells to keep
+selected_Count <- WhichCells(filt.SO, expression = nCount_RNA < 25000)
+#and subset to only keep those cells
+filt.SO <- subset(filt.SO, cells = selected_Count)
+rm(selected_Count)
+dim(filt.SO)
+```
+
+
+```{r}
+VlnPlot(filt.SO, c("nCount_RNA", "nFeature_RNA", "percent.mt", 
+                   "percent.rb", "S.Score", "G2M.Score"),
+        group.by = "orig.ident", pt.size = 0)
+```
+
+
+# Check QCs in reduced dims 
+Check that QCs don't distribute unevenly in reduced expression spaces.
+
+## Dimensionality reduction
+```{r}
+#Reset default assay to the raw RNA counts
+DefaultAssay(filt.SO) <- "RNA"
+
+# Normalize, transform and select variable features
+filt.SO <- SCTransform(filt.SO,                 
+                       new.assay.name = "filt_SCT_Reg",       
+                       vars.to.regress =c("percent.mt", "G2M.Score", "S.Score"),
+                       method = "glmGamPoi",            
+                       variable.features.n = 3000) #3000 is default
+
+#Reduce dimensions
+filt.SO <- RunPCA(filt.SO) %>%
+  RunUMAP(reduction = "pca", dims = 1:10)
+```
+
+```{r}
+FeaturePlot(filt.SO, c("nCount_RNA", "nFeature_RNA", "percent.mt",
+                       "percent.rb", "S.Score", "G2M.Score"))
+```
+
+# Save data
+Save RDS to continue with the second half of the analysis in a separate script
+```{r}
+saveRDS(filt.SO, paste0(path, "02_Data/",
+                        "03_CompileAndFilter10X_out_", 
+                        Sys.Date(),
+                        ".Rds"))
+filt.SO
+```
+
+Calculated runtime:
+```{r}
+end_time <- Sys.time()
+paste0("Elapsed time: ", end_time - start_time)
+sessionInfo()
+```
