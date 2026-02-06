@@ -53,4 +53,5 @@ Three scripts that each use the scmap method from Kiselev et al 2018 (DOI:10.103
 07_scmapSolOnCao.R - Projection of sorted mouse neural crest cells from Soldatov et al. (2019) onto the mouse embryonic cell atlas from Cao et al. (2019).  
   
 08_scmapSmrtSOnCao.R -  Projection of strictly sorted wall lizard cells (Smart-seq3 data) onto the mouse embryonic cell atlas from Cao et al. (2019).  
-
+  
+09_CountScmapClassifications.Rmd - For panel B in suplementary figure 3.
